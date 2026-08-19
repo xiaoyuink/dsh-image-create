@@ -1,0 +1,20 @@
+# 依赖
+node_modules/
+
+# 构建产物
+lib/
+
+# 运行时数据：生成的历史图片与索引（个人数据，不提交；仅根目录，不影响 docs/images/）
+/images/
+/index.json
+
+# 草稿/临时
+drafts/
+*.log
+*.tmp
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
