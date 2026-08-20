@@ -11,8 +11,17 @@ import { useState } from 'react'
 import { PRESET_PROVIDER_CATALOG } from '../protocol.ts'
 import { tt } from './helpers.ts'
 
+/** 与后端 routes.ts 一致的脱敏占位符：GET 时已存密钥会被替换成它。 */
+const MASKED_KEY = '********'
+
 export interface ProviderModel {
   id: string
+}
+
+/** 候选模型（含后端标注的生图能力）。 */
+interface DiscoveredModel {
+  id: string
+  image?: boolean
 }
 
 export interface Provider {
@@ -67,11 +76,13 @@ interface ProviderEditorProps {
   id?: string
   /** 已存在的供应商（编辑）；null = 添加。 */
   initial: Provider | null
+  /** 已存在的供应商 baseUrl 集合（去尾斜杠、小写），用于在下拉里禁用重复预设。 */
+  existingBaseUrls?: string[]
   onSave: (provider: Provider) => void | Promise<void>
   onCancel: () => void
 }
 
-export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditorProps) {
+export function ProviderEditor({ id, initial, existingBaseUrls = [], onSave, onCancel }: ProviderEditorProps) {
   // apiKey 不回显：输入框初始为空；留空保存 = 保留原 Key。
   const [presetKey, setPresetKey] = useState(() => {
     const url = initial?.apiBaseUrl ?? ''
@@ -82,15 +93,21 @@ export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditor
   const [apiKey, setApiKey] = useState('')
   const hasExistingKey = !!(initial && initial.apiKey && initial.apiKey !== '')
   const [models, setModels] = useState<ProviderModel[]>(initial?.models ?? [])
-  const [discovered, setDiscovered] = useState<ProviderModel[] | null>(null)
+  const [discovered, setDiscovered] = useState<DiscoveredModel[] | null>(null)
   const [discoveredSource, setDiscoveredSource] = useState<'preset' | 'live'>('live')
   const [discoveredWarning, setDiscoveredWarning] = useState('')
   const [discovering, setDiscovering] = useState(false)
   const [manualId, setManualId] = useState('')
+  const [search, setSearch] = useState('')
+  // 人工纠错：模型 id → 是否生图（覆盖后端 guessImageGen 判定）
+  const [imageOverrides, setImageOverrides] = useState<Record<string, boolean>>({})
+  // 候选列表排序：名称（主）、生图（次），各 none/asc/desc
+  const [nameSort, setNameSort] = useState<'none' | 'asc' | 'desc'>('none')
+  const [imageSort, setImageSort] = useState<'none' | 'asc' | 'desc'>('none')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  /** 选择厂商模板：自动填入名称与端点（并预填内置候选模型）。 */
+  /** 选择厂商模板：自动填入名称与端点（不预填模型，模型须点「获取模型列表」后勾选或手动添加）。 */
   const applyPreset = (value: string): void => {
     setPresetKey(value)
     if (value === '') return
@@ -98,11 +115,47 @@ export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditor
     if (preset !== undefined) {
       setName(preset.name)
       setBaseUrl(preset.apiBaseUrl)
-      setModels(preset.models.map(m => ({ id: m.id })))
     }
   }
 
   const hasModel = (id: string): boolean => models.some(m => m.id === id)
+
+  // 模型是否生图：人工纠错覆盖表优先，否则用后端 guessImageGen 判定
+  const effectiveImage = (m: DiscoveredModel): boolean =>
+    Object.prototype.hasOwnProperty.call(imageOverrides, m.id)
+      ? imageOverrides[m.id]
+      : m.image !== false
+
+  // 切换某模型的人工生图判定
+  const toggleOverride = (id: string): void => {
+    setImageOverrides(prev => {
+      const next = { ...prev }
+      const base = next[id] ?? (discovered?.find(m => m.id === id)?.image ?? false)
+      next[id] = !base
+      return next
+    })
+  }
+
+  // 已获取候选模型：排序（名称为主、生图为次）+ 按搜索词（不区分大小写）过滤
+  const q = search.trim().toLowerCase()
+  const filteredDiscovered = discovered === null
+    ? null
+    : [...discovered]
+        .sort((a, b) => {
+          // 主排序：按名称
+          if (nameSort !== 'none') {
+            const cmp = a.id.localeCompare(b.id)
+            if (cmp !== 0) return nameSort === 'asc' ? cmp : -cmp
+          }
+          // 次排序：按是否生图（asc=生图优先 true 在前，desc=非生图优先 false 在前）
+          if (imageSort !== 'none') {
+            const diff = Number(effectiveImage(b)) - Number(effectiveImage(a))
+            const sign = imageSort === 'asc' ? 1 : -1
+            if (diff !== 0) return diff * sign
+          }
+          return 0
+        })
+        .filter(m => q === '' || m.id.toLowerCase().includes(q))
 
   const discover = async (): Promise<void> => {
     setDiscovering(true)
@@ -112,11 +165,13 @@ export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditor
       const resp = await fetch('/api/dsh-image-create/models', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl, apiKey }),
+        // 本地为空但已存 key 时传占位符，让后端走「找回原 key」分支
+        // （routes.ts 对 MASKED_KEY / '' / cred: / env: 都会按 baseUrl 回查真实 key）。
+        body: JSON.stringify({ baseUrl, apiKey: apiKey.trim() !== '' ? apiKey : (hasExistingKey ? MASKED_KEY : '') }),
       })
       const json = await resp.json()
       if (json.ok && json.models) {
-        setDiscovered(json.models.map((m: { id: string }) => ({ id: m.id })))
+        setDiscovered(json.models.map((m: { id: string; image?: boolean }) => ({ id: m.id, image: m.image })))
         setDiscoveredSource(json.source === 'preset' ? 'preset' : 'live')
         setDiscoveredWarning(json.warning ?? '')
       } else {
@@ -167,13 +222,19 @@ export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditor
     }
   }
 
+  // 已存在的供应商 baseUrl（去尾斜杠、小写），用于禁用重复预设
+  const existingSet = new Set(existingBaseUrls.map(u => u.replace(/\/+$/, '').toLowerCase()))
+
   const presetOptions = [
     <option key="__custom" value="">{tt('settings.customEndpoint')}</option>,
-    ...PROVIDER_PRESETS.map(preset => (
-      <option key={preset.apiBaseUrl} value={preset.apiBaseUrl}>
-        {preset.name}（{preset.apiBaseUrl}）
-      </option>
-    )),
+    ...PROVIDER_PRESETS.map(preset => {
+      const exists = existingSet.has(preset.apiBaseUrl.replace(/\/+$/, '').toLowerCase())
+      return (
+        <option key={preset.apiBaseUrl} value={preset.apiBaseUrl} disabled={exists}>
+          {preset.name}（{preset.apiBaseUrl}）{exists ? ` · ${tt('settings.presetAdded')}` : ''}
+        </option>
+      )
+    }),
   ]
 
   return (
@@ -222,8 +283,41 @@ export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditor
             {discovering ? tt('settings.fetchingModels') : tt('settings.fetchModels')}
           </button>
           <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
-            {apiKey.trim() === '' ? tt('settings.noKeyForPreset') : ''}
+            {apiKey.trim() === ''
+              ? (hasExistingKey ? tt('settings.usingStoredKey') : tt('settings.noKeyForPreset'))
+              : ''}
           </span>
+          {discovered !== null && discovered.length > 0 ? (
+            <>
+              <select
+                className="zGbnIq_input zGbnIq_sortSelect"
+                value={nameSort}
+                onChange={(e) => setNameSort(e.target.value as 'none' | 'asc' | 'desc')}
+                title={tt('settings.sortNameTitle')}
+              >
+                <option value="none">{tt('settings.sortNameNone')}</option>
+                <option value="asc">{tt('settings.sortNameAsc')}</option>
+                <option value="desc">{tt('settings.sortNameDesc')}</option>
+              </select>
+              <select
+                className="zGbnIq_input zGbnIq_sortSelect"
+                value={imageSort}
+                onChange={(e) => setImageSort(e.target.value as 'none' | 'asc' | 'desc')}
+                title={tt('settings.sortImageTitle')}
+              >
+                <option value="none">{tt('settings.sortImageNone')}</option>
+                <option value="asc">{tt('settings.sortImageAsc')}</option>
+                <option value="desc">{tt('settings.sortImageDesc')}</option>
+              </select>
+              <input
+                className="zGbnIq_input zGbnIq_searchInput"
+                type="search"
+                value={search}
+                placeholder={tt('settings.searchModels')}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </>
+          ) : null}
         </div>
 
         {discovered !== null && discovered.length > 0 ? (
@@ -232,15 +326,38 @@ export function ProviderEditor({ id, initial, onSave, onCancel }: ProviderEditor
               <p className="zGbnIq_notice">{discoveredWarning}</p>
             ) : null}
             <ul className="iv_candidateList">
-              {discovered.map(model => (
-                <li key={model.id} className="zGbnIq_candidate">
-                  <label className="iv_candidateLabel">
-                    <input type="checkbox" checked={hasModel(model.id)} onChange={() => toggleModel(model)} />
-                    <span className="iv_candidateId">{model.id}</span>
-                  </label>
-                </li>
-              ))}
+              {filteredDiscovered !== null && filteredDiscovered.map(model => {
+                const isImage = effectiveImage(model)
+                return (
+                  <li key={model.id} className="zGbnIq_candidate">
+                    <label className="iv_candidateLabel" style={isImage ? undefined : { opacity: 0.55 }}>
+                      <input
+                        type="checkbox"
+                        checked={hasModel(model.id)}
+                        disabled={!isImage}
+                        title={isImage ? '' : tt('settings.notImageModel')}
+                        onChange={() => toggleModel(model)}
+                      />
+                      <span className="iv_candidateId">{model.id}</span>
+                      <button
+                        type="button"
+                        className="zGbnIq_iconButton"
+                        title={tt('settings.correctHint')}
+                        onClick={() => toggleOverride(model.id)}
+                      >
+                        ⇄
+                      </button>
+                      <span className={`zGbnIq_rowTag ${isImage ? 'iv_visionYes' : 'iv_visionNo'}`}>
+                        {isImage ? tt('settings.imageModel') : tt('settings.notImageModel')}
+                      </span>
+                    </label>
+                  </li>
+                )
+              })}
             </ul>
+            {filteredDiscovered !== null && filteredDiscovered.length === 0 ? (
+              <p className="zGbnIq_modelEmpty">{tt('settings.noModels')}</p>
+            ) : null}
           </div>
         ) : null}
 

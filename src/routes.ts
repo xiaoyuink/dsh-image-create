@@ -231,6 +231,21 @@ function findPreset(baseUrl: string): { name: string; models: string[] } | null 
   return null
 }
 
+/**
+ * 模型 id 关键词启发式判断：是否为图像生成（text-to-image）模型。
+ * 覆盖各预设厂商的生图型号 id 特征；裸 qwen / hunyuan-standard 等文本模型不命中。
+ */
+const IMAGEGEN_HINTS: RegExp[] = [
+  /gpt-image/i, /dall-e/i, /flux/i, /stable-diffusion/i, /sdxl/i,
+  /cogview/i, /hunyuan-image/i, /doubao-?[\w.-]*image-?generate/i,
+  /qwen-?image/i, /minimax-?image/i, /step-1x/i, /janus/i,
+  /kolors/i, /pixart/i, /ideogram/i, /recraft/i, /midjourney/i,
+]
+function guessImageGen(modelId: string): boolean {
+  const id = String(modelId ?? '').toLowerCase()
+  return IMAGEGEN_HINTS.some(re => re.test(id))
+}
+
 /** Reason message for model list failure. */
 function reasonMessage(reason: string): string {
   switch (reason) {
@@ -424,12 +439,14 @@ export function makeRoutes(deps: ImageGenRoutesDeps, options: { enabled?: boolea
         if (apiKey === MASKED_KEY || apiKey === '' || /^(env|cred):/.test(apiKey)) {
           const cfg = deps.resolveFull()
           const match = cfg.providers.find(p => p.apiBaseUrl.replace(/\/+$/, '') === baseUrl)
-          if (match) apiKey = match.apiKey
+          // match.apiKey 可能是 cred:REF / env:VAR 引用，必须解析成真实密钥再用
+          // （否则把 "cred:IMAGEGEN_xxx" 当 Bearer token，端点必返 401）。
+          if (match) apiKey = await deps.resolveKeyRef(match.apiKey)
         }
         // Try to list models from endpoint
         const result = await tryListModels(baseUrl, apiKey)
         if (result.models.length > 0) {
-          writeJson(res, 200, { ok: true, models: result.models.map(id => ({ id })), source: 'live' })
+          writeJson(res, 200, { ok: true, models: result.models.map(id => ({ id, image: guessImageGen(id) })), source: 'live' })
           return
         }
         // Fallback to preset
@@ -437,7 +454,7 @@ export function makeRoutes(deps: ImageGenRoutesDeps, options: { enabled?: boolea
         if (preset !== null) {
           writeJson(res, 200, {
             ok: true,
-            models: preset.models.map(id => ({ id })),
+            models: preset.models.map(id => ({ id, image: guessImageGen(id) })),
             source: 'preset',
             warning: reasonMessage(result.reason ?? 'unknown'),
           })

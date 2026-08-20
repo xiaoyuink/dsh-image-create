@@ -45,9 +45,146 @@ interface ProviderCardProps {
   onAddModels: (providerId: string, models: ProviderModel[]) => void
   onEdit: () => void
   onDelete: () => void
+  onReorderModels: (providerId: string, newModels: ProviderModel[]) => void
+  onDragStart: (e: React.PointerEvent) => void
+  dragging: boolean
+  dragDisabled: boolean
 }
 
-function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onEdit, onDelete }: ProviderCardProps) {
+function ProviderCard({ provider: p, active, onUse, onRemoveModel, onAddModels, onEdit, onDelete, onReorderModels, onDragStart, dragging, dragDisabled }: ProviderCardProps) {
+  // 模型行拖拽排序：按住手柄上下移动，其他模型行实时让位，松手保存
+  const [modelDrag, setModelDrag] = useState<{ index: number } | null>(null)
+  const [previewModels, setPreviewModels] = useState<ProviderModel[] | null>(null)
+
+  const beginModelDrag = (idx: number, e: React.PointerEvent): void => {
+    e.preventDefault()
+    if (dragDisabled) return
+    const cur0 = idx
+    let cur = idx
+    let order = (previewModels ?? p.models).slice()
+    let grabOffset = 0
+    let dragEl: HTMLElement | null = null
+    let lastY = e.clientY
+    const flipBefore = new Map<string, number>()
+    let flipScheduled = false
+    let followScheduled = false
+    let ended = false
+    const layoutTop = (el: HTMLElement): number => {
+      const r = el.getBoundingClientRect()
+      const t = el.style.transform
+      if (typeof t === 'string' && t !== '' && t !== 'none') {
+        const m = t.match(/translateY\((-?[\d.]+)px\)/)
+        if (m !== null) return r.top - parseFloat(m[1])
+      }
+      return r.top
+    }
+    const snap = (): void => {
+      const root = document.querySelector(`[data-iv-provider-id="${p.id}"]`)
+      if (root === null) return
+      const nodes = Array.from(root.querySelectorAll('[data-iv-model-id]')) as HTMLElement[]
+      flipBefore.clear()
+      nodes.forEach(el => flipBefore.set(el.getAttribute('data-iv-model-id') ?? '', layoutTop(el)))
+    }
+    const flip = (): void => {
+      if (flipScheduled || ended) return
+      flipScheduled = true
+      requestAnimationFrame(() => {
+        flipScheduled = false
+        if (ended) return
+        const root = document.querySelector(`[data-iv-provider-id="${p.id}"]`)
+        if (root === null) return
+        const els = Array.from(root.querySelectorAll('[data-iv-model-id]')) as HTMLElement[]
+        els.forEach(el => {
+          if (el === dragEl) return
+          const from = flipBefore.get(el.getAttribute('data-iv-model-id') ?? '')
+          if (from === undefined) return
+          const to = layoutTop(el)
+          const delta = from - to
+          if (Math.abs(delta) < 0.5) return
+          el.style.transition = 'none'
+          el.style.transform = `translateY(${delta}px)`
+          void el.getBoundingClientRect()
+          el.style.transition = 'transform 180ms ease'
+          el.style.transform = ''
+        })
+      })
+    }
+    const follow = (ev: PointerEvent): void => {
+      lastY = ev.clientY
+      if (dragEl === null || followScheduled) return
+      followScheduled = true
+      requestAnimationFrame(() => {
+        followScheduled = false
+        if (dragEl === null || ended) return
+        let ty = lastY - grabOffset - layoutTop(dragEl)
+        const listEl = dragEl.parentElement
+        if (listEl !== null) {
+          const lr = listEl.getBoundingClientRect()
+          const visual = layoutTop(dragEl) + ty
+          const minV = lr.top + 2
+          const maxV = lr.bottom - dragEl.offsetHeight - 2
+          if (visual < minV) ty = minV - layoutTop(dragEl)
+          if (visual > maxV) ty = maxV - layoutTop(dragEl)
+        }
+        if (Math.abs(ty) < 0.5) ty = 0
+        dragEl.style.transition = 'none'
+        dragEl.style.transform = `translateY(${ty}px)`
+      })
+    }
+    setModelDrag({ index: idx })
+    setPreviewModels(order)
+    const rootEl = document.querySelector(`[data-iv-provider-id="${p.id}"]`)
+    if (rootEl !== null) {
+      const initEl = rootEl.querySelector(`[data-iv-model-index="${idx}"]`) as HTMLElement | null
+      if (initEl !== null) {
+        dragEl = initEl
+        grabOffset = e.clientY - layoutTop(initEl)
+        initEl.style.position = 'relative'
+        initEl.style.zIndex = '5'
+        follow(e.nativeEvent)
+      }
+    }
+    const onMove = (ev: PointerEvent): void => {
+      const root = document.querySelector(`[data-iv-provider-id="${p.id}"]`)
+      if (root === null) return
+      const nodes = Array.from(root.querySelectorAll('[data-iv-model-id]')) as HTMLElement[]
+      let target = -1
+      for (let i = 0; i < nodes.length; i++) {
+        const top = layoutTop(nodes[i])
+        if (ev.clientY >= top && ev.clientY <= top + nodes[i].offsetHeight) { target = i; break }
+      }
+      if (target < 0 || target === cur) {
+        follow(ev)
+        return
+      }
+      snap()
+      const next = order.slice()
+      const t = next.splice(cur, 1)[0]
+      next.splice(target, 0, t)
+      order = next
+      cur = target
+      setPreviewModels(next)
+      setModelDrag({ index: cur })
+      flip()
+      follow(ev)
+    }
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      ended = true
+      if (dragEl !== null) {
+        dragEl.style.transform = ''
+        dragEl.style.position = ''
+        dragEl.style.zIndex = ''
+      }
+      setModelDrag(null)
+      setPreviewModels(null)
+      if (cur !== cur0) onReorderModels(p.id, order)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
   // 模型列表收纳状态：true = 收起（默认展开，与视觉插件一致）。
   const [collapsed, setCollapsed] = useState(false)
   // 内嵌「添加模型」面板。
@@ -57,8 +194,8 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
   const [addManual, setAddManual] = useState('')
   const [picked, setPicked] = useState<Record<string, boolean>>({})
 
-  const isActiveProvider = active.startsWith(`${provider.id}:`)
-  const target = resolveActive([provider], active)
+  const isActiveProvider = active.startsWith(`${p.id}:`)
+  const target = resolveActive([p], active)
 
   const addDiscover = async (): Promise<void> => {
     setAddDiscovering(true)
@@ -66,7 +203,7 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
       const resp = await fetch('/api/dsh-image-create/models', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl: provider.apiBaseUrl, apiKey: provider.apiKey || '' }),
+        body: JSON.stringify({ baseUrl: p.apiBaseUrl, apiKey: p.apiKey || '' }),
       })
       const json = await resp.json()
       setAddDiscovered(json.ok && json.models ? json.models.map((m: { id: string }) => ({ id: m.id })) : [])
@@ -90,13 +227,13 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
     const value = addManual.trim()
     if (value === '') return
     setAddManual('')
-    onAddModels(provider.id, [{ id: value }])
+    onAddModels(p.id, [{ id: value }])
   }
 
   const confirmAdd = (): void => {
     const ids = Object.keys(picked)
     if (ids.length === 0) return
-    onAddModels(provider.id, ids.map(id => ({ id })))
+    onAddModels(p.id, ids.map(id => ({ id })))
     setPicked({})
     setAddDiscovered(null)
     setPanelOpen(false)
@@ -149,16 +286,30 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
     </div>
   )
 
+  const shownModels = previewModels ?? p.models
+
   return (
-    <li className={`zGbnIq_rowCard iv_providerCard${isActiveProvider ? ' iv_activeCard' : ''}`}>
+    <li
+      className={`zGbnIq_rowCard iv_providerCard${isActiveProvider ? ' iv_activeCard' : ''}${dragging ? ' iv_dragging' : ''}`}
+      data-iv-provider-id={p.id}
+    >
       <div
         className="zGbnIq_rowHead"
         style={{ background: 'rgba(128,128,128,0.10)', borderRadius: 8, padding: '6px 8px', margin: '-6px -8px' }}
       >
+        <button
+          type="button"
+          className="iv_dragHandle"
+          title={tt('settings.dragSort')}
+          disabled={dragDisabled}
+          onPointerDown={(e) => onDragStart(e)}
+        >
+          ≡
+        </button>
         <Dot active={isActiveProvider} />
         <span className="zGbnIq_rowIdentity">
-          <span className="zGbnIq_rowName">{provider.name}</span>
-          <span className="zGbnIq_rowTag">{provider.models.length} {tt('settings.modelsCount')}</span>
+          <span className="zGbnIq_rowName">{p.name}</span>
+          <span className="zGbnIq_rowTag">{p.models.length} {tt('settings.modelsCount')}</span>
           {isActiveProvider ? <span className="zGbnIq_rowTag iv_visionYes">{tt('settings.inUse')}</span> : null}
         </span>
         <span className="zGbnIq_rowActions">
@@ -180,22 +331,33 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <p className="iv_metaText" style={{ flex: 1 }} title={provider.apiBaseUrl}>
-          {provider.apiBaseUrl}
+        <p className="iv_metaText" style={{ flex: 1 }} title={p.apiBaseUrl}>
+          {p.apiBaseUrl}
         </p>
       </div>
 
-      {!collapsed && provider.models.length > 0 ? (
+      {!collapsed && shownModels.length > 0 ? (
         <ul className="zGbnIq_modelList" style={{ margin: 0 }}>
-          {provider.models.map(model => {
+          {shownModels.map((model, mi) => {
             const isUsing = isActiveProvider && target !== null && target.model.id === model.id
             return (
               <li
                 key={model.id}
-                className="zGbnIq_modelEntry"
+                className={`zGbnIq_modelEntry${modelDrag !== null && modelDrag.index === mi ? ' iv_dragging' : ''}`}
+                data-iv-model-index={mi}
+                data-iv-model-id={model.id}
                 style={isUsing ? { background: 'var(--dsw-alias-interactive-bg-hover)' } : undefined}
               >
                 <div className="zGbnIq_modelRow iv_modelRow">
+                  <button
+                    type="button"
+                    className="iv_dragHandle"
+                    title={tt('settings.dragSort')}
+                    disabled={dragDisabled}
+                    onPointerDown={(e) => beginModelDrag(mi, e)}
+                  >
+                    ≡
+                  </button>
                   <span className="iv_candidateId">{model.id}</span>
                   <button
                     type="button"
@@ -203,7 +365,7 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
                     style={{ height: 28, padding: '0 10px', fontSize: 12, borderRadius: 14 }}
                     disabled={isUsing}
                     title={isUsing ? tt('settings.inUse') : tt('settings.useModel')}
-                    onClick={() => onUse(provider.id, model.id)}
+                    onClick={() => onUse(p.id, model.id)}
                   >
                     {isUsing ? tt('settings.inUse') : tt('settings.use')}
                   </button>
@@ -211,7 +373,7 @@ function ProviderCard({ provider, active, onUse, onRemoveModel, onAddModels, onE
                     type="button"
                     className="zGbnIq_iconButton zGbnIq_iconButtonDanger"
                     title={tt('settings.removeModel')}
-                    onClick={() => onRemoveModel(provider.id, model.id)}
+                    onClick={() => onRemoveModel(p.id, model.id)}
                   >
                     ×
                   </button>
@@ -245,6 +407,8 @@ export function ImageGenSettingsPage() {
   const [editing, setEditing] = useState<{ index: number } | null>(null)
   const [adding, setAdding] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [drag, setDrag] = useState<{ index: number } | null>(null)
+  const [previewOrder, setPreviewOrder] = useState<Provider[] | null>(null)
 
   const reload = async (): Promise<void> => {
     try {
@@ -279,6 +443,143 @@ export function ImageGenSettingsPage() {
     flashSaved()
     // 通知其他表面（生图面板等）重新读取配置。
     try { window.dispatchEvent(new CustomEvent('dsh-image-create-config-changed')) } catch { /* ignore */ }
+  }
+
+  const reorderModels = async (providerId: string, newModels: ProviderModel[]): Promise<void> => {
+    setError('')
+    try {
+      const providers = data.providers.map(pr => pr.id !== providerId ? pr : { ...pr, models: newModels })
+      await saveConfig({ providers })
+    } catch (e) {
+      setError(tt('settings.reorderFailed') + ': ' + String(e instanceof Error ? e.message : e))
+    }
+  }
+
+  const beginProviderDrag = (idx: number, e: React.PointerEvent): void => {
+    e.preventDefault()
+    if (editing !== null || adding) return
+    let cur = idx
+    let order = (previewOrder ?? data.providers).slice()
+    let grabOffset = 0
+    let dragEl: HTMLElement | null = null
+    let lastY = e.clientY
+    const flipBefore = new Map<string, number>()
+    let flipScheduled = false
+    let followScheduled = false
+    let ended = false
+    const layoutTop = (el: HTMLElement): number => {
+      const r = el.getBoundingClientRect()
+      const t = el.style.transform
+      if (typeof t === 'string' && t !== '' && t !== 'none') {
+        const m = t.match(/translateY\((-?[\d.]+)px\)/)
+        if (m !== null) return r.top - parseFloat(m[1])
+      }
+      return r.top
+    }
+    const snap = (): void => {
+      const nodes = Array.from(document.querySelectorAll('[data-iv-provider-id]')) as HTMLElement[]
+      flipBefore.clear()
+      nodes.forEach(el => flipBefore.set(el.getAttribute('data-iv-provider-id') ?? '', layoutTop(el)))
+    }
+    const flip = (): void => {
+      if (flipScheduled || ended) return
+      flipScheduled = true
+      requestAnimationFrame(() => {
+        flipScheduled = false
+        if (ended) return
+        const els = Array.from(document.querySelectorAll('[data-iv-provider-id]')) as HTMLElement[]
+        els.forEach(el => {
+          if (el === dragEl) return
+          const from = flipBefore.get(el.getAttribute('data-iv-provider-id') ?? '')
+          if (from === undefined) return
+          const to = layoutTop(el)
+          const delta = from - to
+          if (Math.abs(delta) < 0.5) return
+          el.style.transition = 'none'
+          el.style.transform = `translateY(${delta}px)`
+          void el.getBoundingClientRect()
+          el.style.transition = 'transform 180ms ease'
+          el.style.transform = ''
+        })
+      })
+    }
+    const follow = (ev: PointerEvent): void => {
+      lastY = ev.clientY
+      if (dragEl === null || followScheduled) return
+      followScheduled = true
+      requestAnimationFrame(() => {
+        followScheduled = false
+        if (dragEl === null) return
+        let ty = lastY - grabOffset - layoutTop(dragEl)
+        const listEl = dragEl.parentElement
+        if (listEl !== null) {
+          const lr = listEl.getBoundingClientRect()
+          const visual = layoutTop(dragEl) + ty
+          const minV = lr.top + 2
+          const maxV = lr.bottom - dragEl.offsetHeight - 2
+          if (visual < minV) ty = minV - layoutTop(dragEl)
+          if (visual > maxV) ty = maxV - layoutTop(dragEl)
+        }
+        if (Math.abs(ty) < 0.5) ty = 0
+        dragEl.style.transition = 'none'
+        dragEl.style.transform = `translateY(${ty}px)`
+      })
+    }
+    setDrag({ index: idx })
+    setPreviewOrder(order)
+    const initEl = document.querySelector(`[data-iv-provider-id="${order[idx].id}"]`) as HTMLElement | null
+    if (initEl !== null) {
+      dragEl = initEl
+      grabOffset = e.clientY - layoutTop(initEl)
+      initEl.style.position = 'relative'
+      initEl.style.zIndex = '5'
+      follow(e.nativeEvent)
+    }
+    const onMove = (ev: PointerEvent): void => {
+      const nodes = Array.from(document.querySelectorAll('[data-iv-provider-id]')) as HTMLElement[]
+      let target = -1
+      for (let i = 0; i < nodes.length; i++) {
+        const top = layoutTop(nodes[i])
+        if (ev.clientY >= top && ev.clientY <= top + nodes[i].offsetHeight) { target = i; break }
+      }
+      if (target < 0 || target === cur) {
+        follow(ev)
+        return
+      }
+      snap()
+      const next = order.slice()
+      const t = next.splice(cur, 1)[0]
+      next.splice(target, 0, t)
+      order = next
+      cur = target
+      setPreviewOrder(next)
+      setDrag({ index: cur })
+      flip()
+      follow(ev)
+    }
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      ended = true
+      if (dragEl !== null) {
+        dragEl.style.transform = ''
+        dragEl.style.position = ''
+        dragEl.style.zIndex = ''
+      }
+      setDrag(null)
+      if (cur !== idx) {
+        saveConfig({ providers: order })
+          .then(() => setPreviewOrder(null))
+          .catch((err) => {
+            setPreviewOrder(null)
+            setError(tt('settings.reorderFailed') + ': ' + String(err instanceof Error ? err.message : err))
+          })
+      } else {
+        setPreviewOrder(null)
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
   }
 
   const activate = async (providerId: string, modelId: string): Promise<void> => {
@@ -354,8 +655,9 @@ export function ImageGenSettingsPage() {
   const providers = data.providers
   const active = data.active
   const target = resolveActive(providers, active)
+  const shownProviders = previewOrder ?? providers
 
-  const providerCards = providers.map((prov, idx) => {
+  const providerCards = shownProviders.map((prov, idx) => {
     // 就地编辑：编辑界面直接渲染在原卡片位置，不收起、不跳转（与视觉插件一致）。
     if (editing !== null && editing.index === idx) {
       return (
@@ -363,6 +665,7 @@ export function ImageGenSettingsPage() {
           key={`edit-${prov.id}`}
           id="iv-editor-edit"
           initial={prov}
+          existingBaseUrls={shownProviders.filter((_, i) => i !== idx).map(p => p.apiBaseUrl)}
           onSave={(draft) => finishEdit(draft)}
           onCancel={() => setEditing(null)}
         />
@@ -378,6 +681,10 @@ export function ImageGenSettingsPage() {
         onAddModels={(pid, ms) => void addModels(pid, ms)}
         onEdit={() => { setEditing({ index: idx }); setAdding(false) }}
         onDelete={() => void removeProvider(prov.id, prov.name)}
+        onReorderModels={(pid, ms) => void reorderModels(pid, ms)}
+        onDragStart={(e) => beginProviderDrag(idx, e)}
+        dragging={drag !== null && drag.index === idx}
+        dragDisabled={editing !== null || adding}
       />
     )
   })
@@ -430,7 +737,7 @@ export function ImageGenSettingsPage() {
       <ul className="zGbnIq_rows">
         {providerCards}
         {adding ? (
-          <ProviderEditor key="add" id="iv-editor-add" initial={null} onSave={(draft) => finishEdit(draft)} onCancel={() => setAdding(false)} />
+          <ProviderEditor key="add" id="iv-editor-add" initial={null} existingBaseUrls={providers.map(p => p.apiBaseUrl)} onSave={(draft) => finishEdit(draft)} onCancel={() => setAdding(false)} />
         ) : null}
       </ul>
 
