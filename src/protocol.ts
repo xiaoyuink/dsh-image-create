@@ -8,7 +8,7 @@
 export const IMAGEGEN_SETTINGS_NAMESPACE = 'image-create'
 
 /** Published package version shared by the host updater and the client UI. */
-export const PLUGIN_VERSION = '1.3.0'
+export const PLUGIN_VERSION = '1.3.1'
 
 /** Same-origin route family (loopback-only, mirroring the dsh-ssh fence). */
 export const SETTINGS_API = {
@@ -45,6 +45,7 @@ export const HISTORY_API = {
   remove: '/api/dsh-image-create/history/remove',
   clear: '/api/dsh-image-create/history/clear',
   image: '/api/dsh-image-create/history/image',
+  openDir: '/api/dsh-image-create/history/open-dir',
 } as const
 
 /** Maximum number of history entries retained host-side (oldest evicted). */

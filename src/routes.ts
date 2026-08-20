@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { SettingsConflictError, settingsNamespace, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
 import { generateImage, generateImageWithFallback, normalizeConfig, resolveProviderKey, type UpstreamConfig } from './engine.ts'
-import { appendHistory, clearHistory, historyImagesDir, listHistory, readHistoryImage, removeHistory } from './history-store.ts'
+import { appendHistory, clearHistory, historyImagesDir, listHistory, openHistoryDir, readHistoryImage, removeHistory } from './history-store.ts'
 import { checkForUpdate, CURRENT_VERSION, installUpdate } from './updater.ts'
 import {
   CONFIG_API, GENERATE_API, HISTORY_API, IMAGEGEN_SETTINGS_NAMESPACE,
@@ -733,6 +733,15 @@ export function makeRoutes(deps: ImageGenRoutesDeps, options: { enabled?: boolea
           'cache-control': 'private, max-age=3600',
         })
         res.end(found.data)
+      },
+    },
+    // ========================================================== HISTORY OPEN DIR
+    {
+      kind: 'exact',
+      path: HISTORY_API.openDir,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return
+        writeJson(res, 200, { ok: true, ...openHistoryDir() })
       },
     },
   ]

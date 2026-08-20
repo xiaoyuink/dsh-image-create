@@ -16,6 +16,7 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the LocaleNamespaceMap merge table.
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import { bindConversationBridge, SessionBridge } from './conversation-bridge.ts'
 import { ImageGenApi } from './api.ts'
 import { ImageGenController } from './controller.ts'
 import { tt } from './helpers.ts'
@@ -56,7 +57,7 @@ export interface ImageGenPluginItemOwnerProps {
 }
 
 /** Required services (fiber inject waiting — the runtime must be up first). */
-export const inject = ['slots', 'locale', 'connection']
+export const inject = ['slots', 'locale', 'connection', 'sessions']
 
 /**
  * Mount the studio, its sidebar entry, and the settings card.
@@ -64,6 +65,18 @@ export const inject = ['slots', 'locale', 'connection']
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-image-create: dictionaries')
+
+  // 主对话框图片附件桥：注入会话服务引用 + 挂载零渲染的会话桥组件，
+  // 「添加到对话框」借此直接把图片加入输入框（绕开 dsh-drop-caret 的
+  // Files drop 落盘拦截，不修改任何其他插件）。
+  bindConversationBridge(ctx.sessions as { scope: (sessionId: string) => unknown })
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left',
+    id: 'dsh-image-create-session',
+    order: 100,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    inject: (sessionId: any) => ({ sessionId }),
+  }, SessionBridge))
 
   // 设置页样式（照抄视觉插件设置页样式表）在客户端入口注入一次。
   injectSettingsVisionCss()

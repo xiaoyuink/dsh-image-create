@@ -197,6 +197,26 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
   background: currentColor;
 }
 
+.panelClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.panelClose:hover {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-dimmed);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .updateBanner {
   display: flex;
   align-items: center;
@@ -374,6 +394,29 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
 .historyClear:hover {
   color: var(--dsw-alias-label-error);
   border-color: var(--dsw-alias-label-error);
+}
+
+.historyHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.historyOpenDir {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary);
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.historyOpenDir:hover {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-dimmed);
 }
 
 .historyList {
@@ -892,7 +935,7 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
   flex: 1;
   min-height: 0;
   width: 100%;
-  object-fit: cover;
+  object-fit: contain;
   background: var(--dsw-alias-bg-base);
 }
 
@@ -907,10 +950,44 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
   border-top: 1px solid var(--dsw-alias-border-l1);
 }
 
-.download {
+.imageCardActions {
   position: absolute;
   top: 8px;
   right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 1;
+}
+
+.imageCard:hover .imageCardActions {
+  opacity: 1;
+}
+
+.imageClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1;
+  color: #d0314e;
+  background: var(--dsw-alias-bg-mask-1);
+  border: 1px solid rgba(208, 49, 78, 0.5);
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+
+.imageClose:hover {
+  background: #fff0f0;
+}
+
+.download {
   padding: 2px 10px;
   font-size: 12px;
   line-height: 20px;
@@ -920,24 +997,33 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 999px;
   text-decoration: none;
-  opacity: 0;
-  transition: opacity 0.12s;
   backdrop-filter: blur(4px);
-}
-
-.imageCard:hover .download {
-  opacity: 1;
 }
 
 .download:hover {
   background: var(--dsw-alias-bg-base);
 }
 
-/* Hover hint for the click-to-zoom behavior. */
-.zoomHint {
+/* Bottom-left hover actions: zoom hint (no click), add-to-edit, add-to-chat. */
+.imageCardHints {
   position: absolute;
   left: 8px;
   bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 1;
+}
+
+.imageCard:hover .imageCardHints {
+  opacity: 1;
+}
+
+.zoomHint,
+.zoomAddToEdit,
+.zoomAddToChat {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -949,14 +1035,21 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
   background: var(--dsw-alias-bg-mask-1);
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 999px;
-  opacity: 0;
-  transition: opacity 0.12s;
   backdrop-filter: blur(4px);
+}
+
+.zoomHint {
   pointer-events: none;
 }
 
-.imageCard:hover .zoomHint {
-  opacity: 1;
+.zoomAddToEdit,
+.zoomAddToChat {
+  cursor: pointer;
+}
+
+.zoomAddToEdit:hover,
+.zoomAddToChat:hover {
+  background: var(--dsw-alias-bg-base);
 }
 
 /* --- spinner --------------------------------------------------------------------- */
@@ -1064,6 +1157,21 @@ html[data-dsh-image-create-active]:not([data-dsh-taskboard-active]):not([data-ds
   overflow: auto;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
+}
+
+/* Zoomed image overflows the stage: cursor becomes a grab hand; while
+   dragging (left button held), it becomes a closed grab hand. */
+.lightboxStage[data-zoomable] {
+  cursor: grab;
+}
+
+.lightboxStage[data-zoomable][data-dragging] {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.lightboxStage[data-zoomable][data-dragging] * {
+  user-select: none;
 }
 
 .lightboxScaleFrame {

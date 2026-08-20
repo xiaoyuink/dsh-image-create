@@ -71,7 +71,7 @@ export function mountPanel(
     container.className = css.view
     column.appendChild(container)
     root = createRoot(container)
-    root.render(<ImageGenPanel api={api} scope={scope} />)
+    root.render(<ImageGenPanel api={api} scope={scope} controller={controller} />)
   }
 
   // The frame mounts after boot settlement; watch for the column's arrival.

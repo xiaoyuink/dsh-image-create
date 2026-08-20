@@ -13,6 +13,7 @@
  */
 
 import { promises as fs } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { HISTORY_MAX, type GenerateMode, type HistoryEntry, type HistoryEntryInput } from './protocol.ts'
@@ -122,6 +123,25 @@ async function ensureDirs(): Promise<void> {
 /** 图片文件实际保存目录（供设置页/面板展示“图片保存于”）。 */
 export function historyImagesDir(): string {
   return IMAGES_DIR
+}
+
+/** 在系统文件管理器中打开图片保存目录（尽力而为，不阻塞调用方）。
+ *  Windows 用 `cmd /c start`（ShellExecute）而不是直接 spawn explorer：
+ *  explorer 是单实例进程，直接 spawn 时新实例需经 IPC 转交已运行的主进程，
+ *  主进程繁忙时会明显延迟；start 由系统 shell 立即处理。 */
+export function openHistoryDir(): { opened: boolean; dir: string } {
+  const dir = IMAGES_DIR
+  try {
+    const child = process.platform === 'win32'
+      ? spawn('cmd', ['/c', 'start', '', dir], { stdio: 'ignore', detached: true, windowsHide: true })
+      : process.platform === 'darwin'
+        ? spawn('open', [dir], { stdio: 'ignore', detached: true })
+        : spawn('xdg-open', [dir], { stdio: 'ignore', detached: true })
+    child.unref()
+    return { opened: true, dir }
+  } catch {
+    return { opened: false, dir }
+  }
 }
 
 /** Read the index, tolerating a missing/corrupt file. */

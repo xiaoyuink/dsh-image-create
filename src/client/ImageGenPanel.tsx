@@ -12,6 +12,8 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ImageGenApi } from './api.ts'
+import type { ImageGenController } from './controller.ts'
+import { addImageFileToConversation } from './conversation-bridge.ts'
 import { errorMessage, tt } from './helpers.ts'
 import type { GeneratedImage, GenerateMode, GenerateRequest, HistoryEntry, HistoryImageRef, UpdateInfo } from '../protocol.ts'
 import type { ImageGenConfig, ImageGenScope } from './settings-scope.ts'
@@ -40,8 +42,25 @@ const DETAILS = ['', 'standard', 'high'] as const
 const PROMPT_MAX = 2000
 const REF_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 const PREVIEW_SCALE_MIN = 0.5
-const PREVIEW_SCALE_MAX = 3
-const PREVIEW_SCALE_STEP = 0.25
+const PREVIEW_SCALE_MAX = 8
+const PREVIEW_SCALE_STEP = 0.1
+
+/** Custom drag payload MIME for dragging a history image onto the edit box. */
+const HISTORY_DRAG_MIME = 'application/x-dsh-image-create-url'
+
+/** Extract a history-image URL from a drag payload. Tries our custom MIME,
+ *  then the standard text/uri-list (browser default for dragged links/images),
+ *  then a plain-text URL we placed ourselves. */
+function dragUrlFrom(dt: DataTransfer | null): string | null {
+  if (dt === null) return null
+  const marker = dt.getData(HISTORY_DRAG_MIME)
+  if (marker !== '') return marker
+  const uri = dt.getData('text/uri-list').split('\n')[0]?.trim() ?? ''
+  if (uri !== '') return uri
+  const plain = dt.getData('text/plain').trim()
+  if (plain.startsWith('/api/dsh-image-create/history/image/')) return plain
+  return null
+}
 
 function clampPreviewScale(scale: number): number {
   return Math.min(PREVIEW_SCALE_MAX, Math.max(PREVIEW_SCALE_MIN, scale))
@@ -118,8 +137,9 @@ function isEditOnlyModelId(id: string): boolean {
 export function ImageGenPanel(props: {
   api: ImageGenApi
   scope: ImageGenScope
+  controller: ImageGenController
 }) {
-  const { api, scope } = props
+  const { api, scope, controller } = props
   const config = useConfig(scope)
   const enabled = config?.enabled ?? true
   const keySet = useKeySet(scope)
@@ -163,7 +183,16 @@ export function ImageGenPanel(props: {
   const [updateResult, setUpdateResult] = useState<'success' | 'failed' | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const previewStage = useRef<HTMLDivElement>(null)
+  const previewDrag = useRef<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null)
+  const previewScaleRef = useRef(previewScale)
+  const [previewDragging, setPreviewDragging] = useState(false)
   const elapsed = useElapsed(generating, startedAt)
+
+  // Keep the cursor-anchored zoom's current scale readable inside onWheel
+  // without a re-render race (the wheel handler is attached once per open).
+  useEffect(() => {
+    previewScaleRef.current = previewScale
+  }, [previewScale])
 
   // 配置就绪后，把当前选中的模型同步到 active 或第一个可用模型。
   useEffect(() => {
@@ -202,6 +231,73 @@ export function ImageGenPanel(props: {
       .catch(() => { /* history unavailable — leave the list empty */ })
     return () => { disposed = true }
   }, [api])
+
+  // The panel stays mounted across open/close cycles (its visibility is driven
+  // by the html[data-dsh-image-create-active] attribute set in mount.tsx), so
+  // the mount-time history load alone would miss generations made afterwards
+  // by agent tools or other browsers. Refresh the list every time the panel
+  // is (re)opened — watch the active attribute, with an activate-event
+  // fallback when MutationObserver is unavailable. While the panel stays open,
+  // poll at a low frequency so agent-tool generations show up in real time.
+  useEffect(() => {
+    const ACTIVE_ATTR = 'data-dsh-image-create-active'
+    const refresh = (): void => {
+      if (!document.documentElement.hasAttribute(ACTIVE_ATTR)) return
+      api.historyList()
+        .then(entries => setHistory(entries))
+        .catch(() => { /* history unavailable — keep the current list */ })
+    }
+    const onActivate = (event: Event): void => {
+      if ((event as CustomEvent<string>).detail === 'image-create') refresh()
+    }
+    let observer: MutationObserver | undefined
+    try {
+      observer = new MutationObserver(refresh)
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: [ACTIVE_ATTR],
+      })
+    } catch {
+      // MutationObserver unavailable — fall back to panel-activate events.
+      document.addEventListener('dsh-panel-activate', onActivate)
+    }
+    refresh()
+    const pollTimer = window.setInterval(refresh, 10_000)
+    return () => {
+      observer?.disconnect()
+      document.removeEventListener('dsh-panel-activate', onActivate)
+      window.clearInterval(pollTimer)
+    }
+  }, [api])
+
+  // Drag & drop guard: dragging a history image carries our custom payload
+  // MIME (plus the browser's default image types). Intercept dragover/drop at
+  // the document capture phase so the image never falls into the main chat
+  // composer or the browser's default "open image" behavior. Events targeting
+  // the panel itself still propagate (the edit upload box handles them).
+  useEffect(() => {
+    const isPanelTarget = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest('[data-dsh-image-create-view]') !== null
+    const hasMarker = (dt: DataTransfer | null): boolean =>
+      dt !== null && Array.from(dt.types).includes(HISTORY_DRAG_MIME)
+    const onDragOver = (event: DragEvent): void => {
+      if (!hasMarker(event.dataTransfer)) return
+      event.preventDefault()
+      if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'
+      if (!isPanelTarget(event.target)) event.stopPropagation()
+    }
+    const onDrop = (event: DragEvent): void => {
+      if (!hasMarker(event.dataTransfer)) return
+      event.preventDefault()
+      if (!isPanelTarget(event.target)) event.stopPropagation()
+    }
+    document.addEventListener('dragover', onDragOver, true)
+    document.addEventListener('drop', onDrop, true)
+    return () => {
+      document.removeEventListener('dragover', onDragOver, true)
+      document.removeEventListener('drop', onDrop, true)
+    }
+  }, [])
 
   // Release checks are host-mediated and intentionally best-effort: a GitHub
   // outage must never make the image-generation studio unavailable.
@@ -249,6 +345,28 @@ export function ImageGenPanel(props: {
     }
     reader.onerror = () => { setError(tt('edit.uploadHint')) }
     reader.readAsDataURL(file)
+  }
+
+  /** Accept a history image dragged onto the edit box: fetch the served
+   *  URL and convert it to a data URL (same shape as acceptFile). */
+  const acceptHistoryImageUrl = async (url: string): Promise<void> => {
+    try {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const blob = await response.blob()
+      if (!blob.type.startsWith('image/')) throw new Error(tt('edit.uploadHint'))
+      if (blob.size > REF_IMAGE_MAX_BYTES) throw new Error(tt('edit.uploadHint'))
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+        reader.onerror = () => reject(new Error(tt('edit.uploadHint')))
+        reader.readAsDataURL(blob)
+      })
+      const name = url.split('/').pop() ?? 'reference.png'
+      setRefImage({ dataUrl, name })
+    } catch (caught) {
+      setError(errorMessage(caught))
+    }
   }
 
   /** Run one generation. */
@@ -362,7 +480,9 @@ export function ImageGenPanel(props: {
   }, [preview])
 
   // A scaled image owns real scrollable space, rather than being visually
-  // transformed and clipped. Recenter the viewport after every zoom or slide.
+  // transformed and clipped. Recenter the viewport when a new image opens or
+  // the preview slides; zooming keeps the cursor-anchored position instead
+  // (see onWheel), so previewScale is intentionally NOT a dependency here.
   useEffect(() => {
     if (preview === null) return
     const frame = window.requestAnimationFrame(() => {
@@ -372,7 +492,34 @@ export function ImageGenPanel(props: {
       stage.scrollTop = Math.max(0, (stage.scrollHeight - stage.clientHeight) / 2)
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [preview, previewScale])
+  }, [preview])
+
+  // Pan-by-drag: once the zoomed image overflows the preview stage, holding
+  // the left mouse button turns the cursor into a grab hand and dragging the
+  // stage moves the viewport (scrollLeft/scrollTop) to inspect image details.
+  useEffect(() => {
+    if (preview === null) return
+    const onMove = (event: MouseEvent): void => {
+      const drag = previewDrag.current
+      const stage = previewStage.current
+      if (drag === null || stage === null) return
+      stage.scrollLeft = drag.scrollLeft - (event.clientX - drag.startX)
+      stage.scrollTop = drag.scrollTop - (event.clientY - drag.startY)
+    }
+    const onUp = (): void => {
+      if (previewDrag.current === null) return
+      previewDrag.current = null
+      setPreviewDragging(false)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      previewDrag.current = null
+      setPreviewDragging(false)
+    }
+  }, [preview])
 
   /** Load a past generation's images into the canvas. */
   const viewHistoryEntry = async (entry: HistoryEntry): Promise<void> => {
@@ -429,6 +576,59 @@ export function ImageGenPanel(props: {
     }
   }
 
+  /** Ask the host to open the image storage directory in the file manager. */
+  const openHistoryDir = async (): Promise<void> => {
+    try {
+      await api.openHistoryDir()
+    } catch (caught) {
+      setError(errorMessage(caught))
+    }
+  }
+
+  /** Remove one image from the canvas (local view only; history untouched). */
+  const closeImage = (index: number): void => {
+    const next = images.filter((_, i) => i !== index)
+    setImages(next)
+    if (next.length === 0) setViewingHistoryId(null)
+  }
+
+  /** Copy a canvas image into the edit box as a reference image. */
+  const addImageToEdit = (index: number): void => {
+    const image = images[index]
+    if (image === undefined) return
+    setMode('edit')
+    setRefImage({
+      dataUrl: srcOf(image),
+      name: `dsh-image-${index + 1}.${extensionOf(image.mime)}`,
+    })
+    if (prompt.trim() === '' && image.revisedPrompt !== undefined) setPrompt(image.revisedPrompt)
+    setError(null)
+  }
+
+  /** Drop a canvas image into the main conversation composer. The DSH input
+   *  bar listens for drop events with a Files payload on document; dispatching
+   *  a full drag sequence (enter → over → drop → end) with a Files-carrying
+   *  DataTransfer inserts the image as a draft attachment (no internal API).
+   *  The File is built straight from the stored base64 so the payload is
+   *  byte-identical to what a real drag of the same image would carry. */
+  const addImageToConversation = (index: number): void => {
+    const image = images[index]
+    if (image === undefined) return
+    try {
+      const binary = atob(image.b64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      const blob = new Blob([bytes], { type: image.mime })
+      const file = new File([blob], `dsh-image-${index + 1}.${extensionOf(image.mime)}`, { type: image.mime })
+      // 走 conversation 服务桥（绕开 drop 事件，避免 dsh-drop-caret 拦截落盘）。
+      void addImageFileToConversation(file).then((err) => {
+        if (err !== null) setError(err)
+      })
+    } catch (caught) {
+      setError(errorMessage(caught))
+    }
+  }
+
   const generateDisabled = generating || !enabled || !configured
   const viewingEntry = viewingHistoryId === null ? null : history.find(entry => entry.id === viewingHistoryId) ?? null
   const previewImage = preview === null ? null : preview.images[preview.index] ?? null
@@ -472,15 +672,24 @@ export function ImageGenPanel(props: {
   return (
     // 拖拽图片时：只有图生图上传框显示“可放置”；面板其余区域显示禁止态，
     // 且所有事件都不冒泡到 document（避免 dsh 对话框输入区拦截图片）。
+    // 从历史记录拖来的图片可在面板任意位置释放：自动切到图生图并填入参考图。
     <div
       className={css.panel}
       onDragEnter={(event) => { event.stopPropagation() }}
       onDragOver={(event) => {
         event.preventDefault()
-        event.dataTransfer.dropEffect = 'none'
+        event.dataTransfer.dropEffect = dragUrlFrom(event.dataTransfer) !== null ? 'copy' : 'none'
         event.stopPropagation()
       }}
-      onDrop={(event) => { event.preventDefault(); event.stopPropagation() }}
+      onDrop={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const url = dragUrlFrom(event.dataTransfer)
+        if (url !== null) {
+          setMode('edit')
+          void acceptHistoryImageUrl(url)
+        }
+      }}
     >
       <header className={css.panelHeader}>
         <span className={css.panelHeading}>
@@ -500,6 +709,15 @@ export function ImageGenPanel(props: {
         >
           <span className={css.connectionDot} aria-hidden="true" />
           {tt(connected ? 'connection.connected' : 'connection.disconnected')}
+        </button>
+        <button
+          type="button"
+          className={css.panelClose}
+          aria-label={tt('panel.close')}
+          title={tt('panel.close')}
+          onClick={() => { controller.close() }}
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
         </button>
       </header>
 
@@ -558,6 +776,11 @@ export function ImageGenPanel(props: {
                       onDrop={(event) => {
                         event.preventDefault()
                         event.stopPropagation()
+                        const url = dragUrlFrom(event.dataTransfer)
+                        if (url !== null) {
+                          void acceptHistoryImageUrl(url)
+                          return
+                        }
                         acceptFile(event.dataTransfer.files?.[0])
                       }}
                     >
@@ -580,6 +803,11 @@ export function ImageGenPanel(props: {
                       onDrop={(event) => {
                         event.preventDefault()
                         event.stopPropagation()
+                        const url = dragUrlFrom(event.dataTransfer)
+                        if (url !== null) {
+                          void acceptHistoryImageUrl(url)
+                          return
+                        }
                         acceptFile(event.dataTransfer.files?.[0])
                       }}
                     >
@@ -811,18 +1039,42 @@ export function ImageGenPanel(props: {
                         {tt('revisedPrompt', { prompt: image.revisedPrompt })}
                       </figcaption>
                     ) : null}
-                    <span className={css.zoomHint}>
-                      <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4"/><path d="M13 13l-3.2-3.2"/><path d="M7 5.4v3.2M5.4 7h3.2"/></svg>
-                      {tt('preview.open')}
+                    <span className={css.imageCardHints}>
+                      <span className={css.zoomHint}>
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4"/><path d="M13 13l-3.2-3.2"/><path d="M7 5.4v3.2M5.4 7h3.2"/></svg>
+                        {tt('preview.open')}
+                      </span>
+                      <span className={css.zoomAddToEdit} onClick={(event) => { event.stopPropagation(); addImageToEdit(index) }}>
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+                        {tt('preview.addToEdit')}
+                      </span>
+                      <span className={css.zoomAddToChat} onClick={(event) => { event.stopPropagation(); void addImageToConversation(index) }}>
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2.5 4h11v7h-11z"/><path d="M2.5 11l3 3h3l-3-3"/></svg>
+                        {tt('image.addToChat')}
+                      </span>
                     </span>
-                    <a
-                      className={css.download}
-                      href={srcOf(image)}
-                      download={`dsh-image-${index + 1}.${extensionOf(image.mime)}`}
-                      onClick={(event) => { event.stopPropagation() }}
-                    >
-                      {tt('download')}
-                    </a>
+                    <span className={css.imageCardActions}>
+                      <button
+                        type="button"
+                        className={css.imageClose}
+                        aria-label={tt('preview.close')}
+                        title={tt('preview.close')}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          closeImage(index)
+                        }}
+                      >
+                        {tt('preview.close')}
+                      </button>
+                      <a
+                        className={css.download}
+                        href={srcOf(image)}
+                        download={`dsh-image-${index + 1}.${extensionOf(image.mime)}`}
+                        onClick={(event) => { event.stopPropagation() }}
+                      >
+                        {tt('download')}
+                      </a>
+                    </span>
                   </figure>
                 ))}
               </div>
@@ -834,11 +1086,16 @@ export function ImageGenPanel(props: {
         <aside className={css.history}>
           <header className={css.historyHeader}>
             <span className={css.historyTitle}>{tt('history.title')}</span>
-            {history.length > 0 ? (
-              <button type="button" className={css.historyClear} onClick={() => { void clearHistory() }}>
-                {tt('history.clear')}
+            <span className={css.historyHeaderActions}>
+              <button type="button" className={css.historyOpenDir} onClick={() => { void openHistoryDir() }}>
+                {tt('history.openDir')}
               </button>
-            ) : null}
+              {history.length > 0 ? (
+                <button type="button" className={css.historyClear} onClick={() => { void clearHistory() }}>
+                  {tt('history.clear')}
+                </button>
+              ) : null}
+            </span>
           </header>
           {config?.saveDir !== undefined && config.saveDir !== '' ? (
             <div className={css.historySaveDir} title={config.saveDir}>
@@ -859,10 +1116,20 @@ export function ImageGenPanel(props: {
                   <button
                     type="button"
                     className={css.historyMain}
+                    draggable
+                    onDragStart={(event) => {
+                      if (entry.images.length === 0) return
+                      const url = entry.images[0]!.url
+                      event.dataTransfer.clearData()
+                      event.dataTransfer.setData(HISTORY_DRAG_MIME, url)
+                      event.dataTransfer.setData('text/uri-list', url)
+                      event.dataTransfer.setData('text/plain', url)
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
                     onClick={() => { void viewHistoryEntry(entry) }}
                   >
                     {entry.images.length > 0 ? (
-                      <img className={css.historyThumb} src={entry.images[0]!.url} alt="" />
+                      <img className={css.historyThumb} src={entry.images[0]!.url} alt="" draggable={false} />
                     ) : (
                       <span className={css.historyThumbPlaceholder} />
                     )}
@@ -917,9 +1184,43 @@ export function ImageGenPanel(props: {
               <div
                 ref={previewStage}
                 className={css.lightboxStage}
+                data-zoomable={previewFrameScale > 1 ? '' : undefined}
+                data-dragging={previewDragging ? '' : undefined}
                 onWheel={(event) => {
                   event.preventDefault()
-                  setPreviewScale(current => clampPreviewScale(current + (event.deltaY < 0 ? PREVIEW_SCALE_STEP : -PREVIEW_SCALE_STEP)))
+                  const stage = previewStage.current
+                  if (stage === null) return
+                  // 光标锚定缩放：记录鼠标在视口中的位置与缩放前滚动偏移，
+                  // 缩放后调整 scroll，使鼠标下方的图片内容保持在鼠标下方。
+                  const rect = stage.getBoundingClientRect()
+                  const mx = event.clientX - rect.left
+                  const my = event.clientY - rect.top
+                  const oldLeft = stage.scrollLeft
+                  const oldTop = stage.scrollTop
+                  const current = previewScaleRef.current
+                  const next = clampPreviewScale(current + (event.deltaY < 0 ? PREVIEW_SCALE_STEP : -PREVIEW_SCALE_STEP))
+                  if (next === current) return
+                  const ratio = next / current
+                  setPreviewScale(next)
+                  window.requestAnimationFrame(() => {
+                    const st = previewStage.current
+                    if (st === null) return
+                    st.scrollLeft = (mx + oldLeft) * ratio - mx
+                    st.scrollTop = (my + oldTop) * ratio - my
+                  })
+                }}
+                onMouseDown={(event) => {
+                  if (event.button !== 0 || previewFrameScale <= 1) return
+                  const stage = previewStage.current
+                  if (stage === null) return
+                  event.preventDefault()
+                  previewDrag.current = {
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    scrollLeft: stage.scrollLeft,
+                    scrollTop: stage.scrollTop,
+                  }
+                  setPreviewDragging(true)
                 }}
               >
                 <div
@@ -931,6 +1232,7 @@ export function ImageGenPanel(props: {
                     style={{ width: `${previewImageScale * 100}%`, height: `${previewImageScale * 100}%` }}
                     src={srcOf(previewImage)}
                     alt={previewImage.revisedPrompt ?? tt('preview.title')}
+                    draggable={false}
                   />
                 </div>
               </div>

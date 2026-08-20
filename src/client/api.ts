@@ -97,4 +97,11 @@ export class ImageGenApi {
     const body = await readEnvelope<{ ok: true; entries: HistoryEntry[] }>(response)
     return body.entries
   }
+
+  /** Ask the host to open the history image directory in the system file manager. */
+  async openHistoryDir(): Promise<{ opened: boolean; dir: string }> {
+    const response = await fetch(HISTORY_API.openDir, { method: 'POST' })
+    const body = await readEnvelope<{ ok: true; opened: boolean; dir: string }>(response)
+    return { opened: body.opened, dir: body.dir }
+  }
 }
