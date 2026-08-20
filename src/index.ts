@@ -325,7 +325,9 @@ export function apply(ctx: Context, config?: Config): void {
               const images = result.images.map(img => ({
                 b64: img.b64,
                 mime: img.mime,
-                revisedPrompt: img.revisedPrompt,
+                // 仅在存在时带 revisedPrompt：DSH 对工具输出做无损 JSON 校验，
+                // undefined 字段会被拒绝（"value is not lossless JSON"）。
+                ...img.revisedPrompt === undefined ? {} : { revisedPrompt: img.revisedPrompt },
               }))
               // 对话框（Agent）生成的图片同样写入面板历史记录，失败不阻断生成。
               try {
