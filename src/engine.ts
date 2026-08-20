@@ -253,6 +253,89 @@ async function requestOneImage(
     return normalizeItem(entry as Record<string, unknown>, upstream)
   }))
 }
+/** DashScope 官方原生文生图接口（qwen-image-3.x 走这条原生路由，不是 OpenAI 兼容的 /images/generations）。 */
+const DASHSCOPE_NATIVE_TEXT_ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
+const DASHSCOPE_NATIVE_MODEL_RE = /^qwen-image-\d/i
+
+function dashScopeNativeUrl(baseUrl: string): string | undefined {
+  const trimmed = baseUrl.trim().replace(/\/+$/, '')
+  if (/\/api\/v1\/services\/aigc\/multimodal-generation\/generation$/.test(trimmed)) return trimmed
+  if (trimmed.includes('dashscope.aliyuncs.com')) return DASHSCOPE_NATIVE_TEXT_ENDPOINT
+  return undefined
+}
+
+function isDashScopeNativeTextRequest(baseUrl: string, model: string): boolean {
+  return dashScopeNativeUrl(baseUrl) !== undefined && DASHSCOPE_NATIVE_MODEL_RE.test(model)
+}
+
+/** 调用 DashScope 官方 multimodal-generation 原生文生图接口。 */
+async function requestDashScopeNativeImage(
+  endpoint: string,
+  upstream: UpstreamConfig,
+  prompt: string,
+  model: string,
+): Promise<GeneratedImage[]> {
+  let response: Response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${upstream.apiKey.trim()}`,
+      },
+      body: JSON.stringify({
+        model,
+        input: { messages: [{ role: 'user', content: [{ text: prompt }] }] },
+        parameters: { prompt_extend: true },
+      }),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/aborter/i.test(message) || /timeout/i.test(message)) {
+      throw new ImageGenError('上游接口响应超时（240 秒）', 'upstream-timeout')
+    }
+    throw new ImageGenError(`无法连接上游接口：${message}`, 'upstream-unreachable')
+  }
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new ImageGenError(`上游接口返回了非 JSON 响应（HTTP ${response.status}）`, 'upstream-invalid')
+  }
+  if (!response.ok) throw new ImageGenError(upstreamMessage(payload, response.status), 'upstream-rejected')
+  if (payload === null || typeof payload !== 'object') throw new ImageGenError(upstreamMessage(payload, response.status), 'upstream-rejected')
+
+  const record = payload as Record<string, unknown>
+  const output = record.output
+  const choices = output !== null && typeof output === 'object'
+    ? (output as Record<string, unknown>).choices
+    : undefined
+  const contentItems: Array<Record<string, unknown>> = []
+  if (Array.isArray(choices)) {
+    for (const choice of choices) {
+      if (choice === null || typeof choice !== 'object') continue
+      const message = (choice as Record<string, unknown>).message
+      const content = message !== null && typeof message === 'object'
+        ? (message as Record<string, unknown>).content
+        : undefined
+      if (Array.isArray(content)) {
+        for (const item of content) {
+          if (item !== null && typeof item === 'object') contentItems.push(item as Record<string, unknown>)
+        }
+      }
+    }
+  }
+
+  const images = contentItems
+    .filter(item => typeof item.image === 'string' && item.image !== '')
+    .map(item => ({ url: item.image as string }))
+  if (images.length === 0) {
+    throw new ImageGenError('上游响应缺少图片数据', 'upstream-invalid')
+  }
+  return Promise.all(images.map(async (entry) => normalizeItem(entry, upstream)))
+}
 
 /**
  * Forward one generate request to a specific upstream endpoint.
@@ -264,6 +347,16 @@ async function generateToEndpoint(
 ): Promise<GenerateResult> {
   const params = effectiveParams(request)
   const count = effectiveCount(request)
+const nativeEndpoint = request.mode === 'text' && isDashScopeNativeTextRequest(baseUrl, params.model)
+    ? dashScopeNativeUrl(baseUrl)
+    : undefined
+  if (nativeEndpoint !== undefined) {
+    return {
+      images: (await Promise.all(
+        Array.from({ length: count }, () => requestDashScopeNativeImage(nativeEndpoint, upstream, request.prompt, params.model)),
+      )).flat(),
+    }
+  }
   try {
     const batches = await Promise.all(
       Array.from({ length: count }, () => requestOneImage(baseUrl, upstream, request, params)),

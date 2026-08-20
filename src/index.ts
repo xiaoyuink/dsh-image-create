@@ -175,7 +175,7 @@ export function apply(ctx: Context, config?: Config): void {
             if (typeof set !== 'function') {
               throw new Error('凭据服务不可用：已拒绝保存明文 API Key，请改用 cred:REF 或 env:VAR 引用')
             }
-            await set(ref, key)
+            await (credentials as { set: (ref: string, key: string) => Promise<void> }).set(ref, key)
           },
           // 保存完整配置（含总开关）：saveProviders 在写入 settings 时一并持久化
           // enabled / announceToAgent，否则总开关永远存不进去、点击无反应。

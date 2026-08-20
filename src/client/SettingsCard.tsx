@@ -167,6 +167,8 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
         setEditDirty(false)
         // Reload to get fresh state
         await loadConfig()
+// 通知主界面生图面板重新读取配置。
+          try { window.dispatchEvent(new CustomEvent('dsh-image-create-config-changed')) } catch { /* ignore */ }
       } else {
         setSaveError(json.message ?? '保存失败')
       }
@@ -284,6 +286,8 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
       const json = await resp.json()
       if (json.ok) {
         await loadConfig()
+// 通知主界面生图面板重新读取配置。
+          try { window.dispatchEvent(new CustomEvent('dsh-image-create-config-changed')) } catch { /* ignore */ }
       }
     } catch {
       // ignore

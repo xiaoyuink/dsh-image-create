@@ -292,6 +292,8 @@ export function ImageGenSettingsPage() {
       const json = await resp.json()
       if (json.ok !== true) throw new Error(json?.message ?? `HTTP ${resp.status}`)
       await reload()
+// 通知主界面生图面板重新读取配置，否则面板模型下拉不会跟随激活变化。
+        try { window.dispatchEvent(new CustomEvent('dsh-image-create-config-changed')) } catch { /* ignore */ }
       flashSaved()
     } catch (e) {
       setError(tt('settings.activateFailed') + ': ' + String(e instanceof Error ? e.message : e))
