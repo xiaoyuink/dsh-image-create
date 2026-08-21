@@ -19,7 +19,7 @@ import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 // Type-only: pulls the systemPrompt Context merge (announcement section).
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { IMAGEGEN_SETTINGS_NAMESPACE, PRESET_PROVIDER_CATALOG, type Provider } from './protocol.ts'
+import { IMAGEGEN_SETTINGS_NAMESPACE, PRESET_PROVIDER_CATALOG, RAW_API, type Provider } from './protocol.ts'
 import { appendHistory } from './history-store.ts'
 import { makeRoutes, type ImageGenRoutesDeps, type SettingsSeam } from './routes.ts'
 import { generateImageWithFallback, normalizeConfig, resolveProviderKey } from './engine.ts'
@@ -28,7 +28,7 @@ import { generateImageWithFallback, normalizeConfig, resolveProviderKey } from '
 export const name = 'dsh-image-create'
 
 /** Services required before the surfaces can mount. */
-export const inject = ['webServer', 'systemPrompt', 'tools']
+export const inject = ['webServer', 'systemPrompt', 'tools', 'attachments']
 
 // Internals re-exported for smoke tests and host-side debugging; the plugin
 // contract only requires name / inject / Config / apply.
@@ -80,7 +80,7 @@ const DEFAULT_ANNOUNCE = true
 const SECTION_ORDER = 150
 
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
-export const IMAGEGEN_GUIDANCE = '本机已安装 dsh-image-create 插件（DSH 生图插件）：侧边栏「生图插件」入口。Agent 可通过 generate_image 工具调用生图。能力：对接 OpenAI 兼容图像生成 API，支持文生图（/images/generations）与图生图（/images/edits，上传参考图）；支持多供应商配置与自动降级；API 地址与密钥在 GUI「设置 → 插件 → 可配置」中配置，密钥以 cred:REF 引用存储于凭据服务；生成请求由本地宿主代理转发，结果以 base64 返回面板，可预览与下载。限制：生成消耗上游 API 额度；图片内容由上游模型生成，可能不符合预期或包含不适宜内容；参考图会发送至所配置的 API 服务。用户提到「生图 / 绘画 / 生成图片 / 文生图 / 图生图」时即指本插件，请据此协作。'
+export const IMAGEGEN_GUIDANCE = '本机已安装 dsh-image-create 插件（DSH 生图插件）：侧边栏「生图插件」入口。Agent 可通过 generate_image 工具调用生图。能力：对接 OpenAI 兼容图像生成 API，支持文生图（/images/generations）与图生图（/images/edits，上传参考图）；支持多供应商配置与自动降级；API 地址与密钥在 GUI「设置 → 插件 → 可配置」中配置，密钥以 cred:REF 引用存储于凭据服务；生成请求由本地宿主代理转发，结果以 base64 返回面板，可预览与下载。工具输出含 markdown 字段（形如 `![图片](/api/dsh-image-create/raw/...)`）：回复用户时请把 markdown 内容原样嵌入你的消息正文，消息对话框即会渲染图片；若工具输出无 markdown 字段（附件存储不可用），则以文字描述图片内容并提示可在「生图插件」面板历史记录中查看。限制：生成消耗上游 API 额度；图片内容由上游模型生成，可能不符合预期或包含不适宜内容；参考图会发送至所配置的 API 服务。用户提到「生图 / 绘画 / 生成图片 / 文生图 / 图生图」时即指本插件，请据此协作。'
 
 /** Effective config (schema defaults applied). */
 interface EffectiveConfig {
@@ -113,6 +113,64 @@ async function resolveKeyRef(ctx: Context, raw: string): Promise<string> {
     return name === '' ? '' : String(process.env[name] ?? '')
   }
   return s
+}
+
+/** 动态加载 sharp（失败不影响插件本体，仅在压缩超限图片时才需要）。 */
+let sharpPromise: Promise<any> | null = null
+function loadSharp(): Promise<any> {
+  if (sharpPromise === null) {
+    sharpPromise = import('sharp')
+      .then(mod => (mod as { default?: unknown }).default ?? mod)
+      .catch(error => {
+        sharpPromise = null
+        throw new Error(`sharp 图像库不可用: ${error instanceof Error ? error.message : String(error)}`)
+      })
+  }
+  return sharpPromise
+}
+
+/**
+ * 把超过附件存储上限的生成图片压缩到 maxBytes 以内。
+ * 优先转 JPEG（质量从高到低，体积大幅下降、画质几乎无损），仍超限则降采样分辨率。
+ * 未超限时原样返回。
+ */
+async function fitImageToLimit(bytes: Buffer, declaredMime: string, maxBytes: number): Promise<{ data: Buffer; mediaType: string }> {
+  if (bytes.byteLength <= maxBytes) return { data: bytes, mediaType: declaredMime }
+  const sharp = await loadSharp()
+  const make = () => sharp(bytes, { failOn: 'error', limitInputPixels: false })
+  const meta = await make().metadata()
+  const width = meta.width ?? 1024
+  const height = meta.height ?? 1024
+  for (const quality of [90, 82, 74, 66, 58]) {
+    const out = await make().jpeg({ quality }).toBuffer()
+    if (out.byteLength <= maxBytes) return { data: out, mediaType: 'image/jpeg' }
+  }
+  for (const scale of [0.8, 0.6, 0.5]) {
+    const out = await make()
+      .resize(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)))
+      .jpeg({ quality: 74 })
+      .toBuffer()
+    if (out.byteLength <= maxBytes) return { data: out, mediaType: 'image/jpeg' }
+  }
+  const out = await make().resize(768, 768, { fit: 'inside' }).jpeg({ quality: 60 }).toBuffer()
+  return { data: out, mediaType: 'image/jpeg' }
+}
+
+/** Resolve the DSH attachment store face, or undefined when unavailable. */
+function resolveAttachments(ctx: Context): ImageGenRoutesDeps['attachments'] {
+  const attachments = (ctx as { get?: (name: string) => unknown })?.get?.('attachments')
+  if (attachments === undefined || typeof attachments !== 'object') return undefined
+  const store = attachments as {
+    saveImage?: (input: { data: Uint8Array; mediaType: string; name?: string }) => Promise<unknown>
+    readImage?: (ref: unknown, signal?: AbortSignal) => Promise<{ data?: Uint8Array }>
+  }
+  if (typeof store.saveImage !== 'function' || typeof store.readImage !== 'function') return undefined
+  const deps: ImageGenRoutesDeps['attachments'] = {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    saveImage: store.saveImage as NonNullable<ImageGenRoutesDeps['attachments']>['saveImage'],
+    readImage: store.readImage as NonNullable<ImageGenRoutesDeps['attachments']>['readImage'],
+  }
+  return deps
 }
 
 /**
@@ -166,6 +224,8 @@ export function apply(ctx: Context, config?: Config): void {
             } as unknown as Record<string, unknown>)
           },
           resolveKeyRef: async (raw: string) => resolveKeyRef(ctx, raw),
+          // 附件存储访问（生成图片 → markdown 引用 → 消息对话框渲染）。
+          attachments: resolveAttachments(ctx),
           // 明文 API Key → DSH 凭据服务（settings 只留 cred:REF，与视觉插件一致）。
           storeCredential: async (ref: string, key: string) => {
             const credentials = (ctx as { get?: (name: string) => unknown })?.get?.('credentials')
@@ -219,6 +279,8 @@ export function apply(ctx: Context, config?: Config): void {
   // Register the generate_image tool for agents.
   ctx.inject(['tools'], (tctx) => {
     tctx.effect(() => {
+      // execute 阶段保存的图片附件引用，按 callId 索引，供 finalizeContent 组装 image blocks。
+      const pendingImages = new Map<string, Array<{ ref: import('@deepseek-ai/dsh-attachment').ImageAttachmentRef; revisedPrompt?: string }>>()
       // 工具生命周期跟随总开关：关闭时注销，打开时注册。
       const syncToolNow = (): void => {
         if (disposeTool !== undefined) {
@@ -278,13 +340,27 @@ export function apply(ctx: Context, config?: Config): void {
                     },
                   },
                 },
+                markdown: { type: 'string' },
                 error: { type: 'string' },
                 historyError: { type: 'string' },
               },
             },
-            render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+            render: (_args, value) => {
+              // 模型侧只消费摘要 + markdown 图片引用，避免把巨大 base64 输出进
+              // 会话上下文（图片本身通过 finalizeContent 的 image blocks 渲染）。
+              const record = value as { images?: Array<{ b64?: string; mime?: string; revisedPrompt?: string }>; markdown?: string; error?: string; historyError?: string }
+              if (record.error !== undefined && record.error !== '') {
+                return [{ type: 'text', text: `generate_image 失败：${record.error}` }]
+              }
+              const count = record.images?.length ?? 0
+              const lines: string[] = [`generate_image 已生成 ${count} 张图片。`]
+              if (record.markdown !== undefined && record.markdown !== '') lines.push(record.markdown)
+              const revised = record.images?.map(img => img.revisedPrompt).find(prompt => prompt !== undefined && prompt !== '')
+              if (revised !== undefined) lines.push(`上游改写提示词：${revised}`)
+              return [{ type: 'text', text: lines.join('\n') }]
+            },
           },
-          async execute(args) {
+          async execute(args, exec) {
             const effective = resolve()
             const cfg = normalizeConfig({
               enabled: effective.enabled,
@@ -346,10 +422,57 @@ export function apply(ctx: Context, config?: Config): void {
               } catch (error) {
                 return { images, historyError: error instanceof Error ? error.message : String(error) }
               }
-              return { images }
+              // 把生成图片保存到 DSH 附件存储，供 finalizeContent 组装 image blocks，
+              // 让 agent 消息对话框直接渲染图片（引用永久有效）。附件存储不可用时
+              // 放弃，不阻断生成 —— 图片仍可通过面板历史记录查看。
+              const attachments = resolveAttachments(ctx)
+              let markdown = ''
+              if (attachments !== undefined) {
+                // 附件存储单张上限（部署默认 5MB）。生成的 PNG 常超限导致 saveImage
+                // 被拒、markdown 缺失，图片无法在对话框显示；这里先压缩到上限内再保存。
+                const store = (ctx as { get?: (name: string) => unknown }).get?.('attachments') as { imageLimits?: { maxImageBytes?: number } } | undefined
+                const maxBytes = typeof store?.imageLimits?.maxImageBytes === 'number' && store.imageLimits.maxImageBytes > 0
+                  ? store.imageLimits.maxImageBytes
+                  : 5 * 1024 * 1024
+                const refs: string[] = []
+                const saved: Array<{ ref: import('@deepseek-ai/dsh-attachment').ImageAttachmentRef; revisedPrompt?: string }> = []
+                for (const img of result.images) {
+                  try {
+                    let bytes = Buffer.from(img.b64, 'base64')
+                    if (bytes.byteLength === 0) continue
+                    let mediaType = img.mime as import('@deepseek-ai/dsh-attachment').SaveImageAttachment['mediaType']
+                    if (bytes.byteLength > maxBytes) {
+                      const fitted = await fitImageToLimit(bytes, mediaType, maxBytes)
+                      bytes = fitted.data
+                      mediaType = fitted.mediaType as import('@deepseek-ai/dsh-attachment').SaveImageAttachment['mediaType']
+                    }
+                    const ref = await attachments.saveImage({ data: bytes, mediaType })
+                    saved.push({ ref, ...img.revisedPrompt === undefined ? {} : { revisedPrompt: img.revisedPrompt } })
+                    const q = `m=${encodeURIComponent(ref.mediaType)}&b=${ref.bytes}&w=${ref.width}&h=${ref.height}`
+                    refs.push(`![图片](${RAW_API}/${encodeURIComponent(ref.attachmentId)}?${q})`)
+                  } catch {
+                    // 单张保存失败不影响其余图片。
+                  }
+                }
+                if (saved.length > 0) pendingImages.set(exec.callId, saved)
+                if (refs.length > 0) markdown = refs.join('\n')
+              }
+              return { images, ...markdown === '' ? {} : { markdown } }
             } catch (error) {
               return { error: error instanceof Error ? error.message : String(error) }
             }
+          },
+          finalizeContent(exec) {
+            const saved = pendingImages.get(exec.callId)
+            if (saved === undefined || saved.length === 0) return undefined
+            pendingImages.delete(exec.callId)
+            const blocks: import('@deepseek-ai/dsh-llm/types').ContentBlock[] = saved.map(item => ({
+              type: 'image',
+              attachment: item.ref,
+            }))
+            // 附上生成参数摘要文本块，让消息对话框同时显示提示词。
+            blocks.push({ type: 'text', text: `已生成 ${saved.length} 张图片。` })
+            return blocks
           },
         }))
       }

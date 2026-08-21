@@ -8,12 +8,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { SettingsConflictError, settingsNamespace, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
+import type { ImageAttachmentRef, SaveImageAttachment, StoredImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { generateImage, generateImageWithFallback, normalizeConfig, resolveProviderKey, type UpstreamConfig } from './engine.ts'
 import { appendHistory, clearHistory, historyImagesDir, listHistory, openHistoryDir, readHistoryImage, removeHistory } from './history-store.ts'
 import { checkForUpdate, CURRENT_VERSION, installUpdate } from './updater.ts'
 import {
   CONFIG_API, GENERATE_API, HISTORY_API, IMAGEGEN_SETTINGS_NAMESPACE,
-  PRESET_PROVIDER_CATALOG, SETTINGS_API, UPDATE_API,
+  PRESET_PROVIDER_CATALOG, RAW_API, SETTINGS_API, UPDATE_API,
   type GeneratedImage, type GenerateRequest, type HistoryEntry, type HistoryEntryInput, type Provider,
 } from './protocol.ts'
 
@@ -55,6 +56,11 @@ export interface ImageGenRoutesDeps {
     remove: (id: string) => Promise<HistoryEntry[]>
     clear: () => Promise<HistoryEntry[]>
     readImage: (file: string) => Promise<{ data: Buffer; mime: string } | undefined>
+  }
+  /** DSH 附件存储的访问函数（保存/读取图片），供 raw 路由与 markdown 引用使用。 */
+  attachments?: {
+    saveImage: (input: SaveImageAttachment) => Promise<ImageAttachmentRef>
+    readImage: (ref: ImageAttachmentRef, signal?: AbortSignal) => Promise<StoredImageAttachment>
   }
 }
 
@@ -159,6 +165,40 @@ function imageFileFrom(rawUrl: string | undefined, basePath: string): string | u
   }
   if (!pathname.startsWith(`${basePath}/`)) return undefined
   return decodeURIComponent(pathname.slice(basePath.length + 1))
+}
+
+/** 附件存储引用可用的媒体类型（与 DSH attachment 白名单一致）。 */
+const RAW_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+/** 解析附件存储 raw 引用 URL：/api/dsh-image-create/raw/<encodedId>?m=..&b=..&w=..&h=..
+ *  元数据全部来自 URL（digest 形如 sha256:<64 hex>，类型/字节/像素为正数），
+ *  校验通过才返回完整的 ImageAttachmentRef，否则返回 null。 */
+function parseRawRef(rawUrl: string | undefined): ImageAttachmentRef | null {
+  if (rawUrl === undefined) return null
+  let url: URL
+  try {
+    url = new URL(rawUrl, 'http://localhost')
+  } catch {
+    return null
+  }
+  const prefix = `${RAW_API}/`
+  if (!url.pathname.startsWith(prefix)) return null
+  let attachmentId: string
+  try {
+    attachmentId = decodeURIComponent(url.pathname.slice(prefix.length))
+  } catch {
+    return null
+  }
+  if (!/^sha256:[a-f0-9]{64}$/i.test(attachmentId)) return null
+  const q = url.searchParams
+  const mediaType = q.get('m') ?? ''
+  const bytes = Number(q.get('b'))
+  const width = Number(q.get('w'))
+  const height = Number(q.get('h'))
+  if (!RAW_MEDIA_TYPES.has(mediaType)) return null
+  if (!Number.isFinite(bytes) || !Number.isFinite(width) || !Number.isFinite(height)) return null
+  if (bytes <= 0 || width <= 0 || height <= 0) return null
+  return { attachmentId, mediaType, bytes, width, height }
 }
 
 /** Project one settings descriptor onto the bridge wire view. */
@@ -742,6 +782,46 @@ export function makeRoutes(deps: ImageGenRoutesDeps, options: { enabled?: boolea
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return
         writeJson(res, 200, { ok: true, ...openHistoryDir() })
+      },
+    },
+
+    // ========================================================== RAW IMAGE (attachment store)
+    // 附件存储引用 URL：/api/dsh-image-create/raw/<encodedId>?m=..&b=..&w=..&h=..
+    // 元数据编进 URL（digest/类型/尺寸），进程重启后旧引用依然可读；与
+    // dsh-image-vision 的 raw 路由同款设计，供消息对话框渲染生成图片。
+    {
+      kind: 'prefix',
+      path: RAW_API,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const attachments = deps.attachments
+        if (attachments === undefined) {
+          writeJson(res, 404, { error: 'attachment store unavailable' })
+          return
+        }
+        const ref = parseRawRef(req.url)
+        if (ref === null) {
+          writeJson(res, 400, { error: 'invalid attachment reference' })
+          return
+        }
+        try {
+          const stored = await attachments.readImage(ref, AbortSignal.timeout(15000))
+          res.writeHead(200, {
+            'content-type': ref.mediaType,
+            'content-length': stored.data.byteLength,
+            'cache-control': 'public, max-age=31536000, immutable',
+          })
+          res.end(Buffer.from(stored.data))
+        } catch {
+          writeJson(res, 404, { error: 'attachment not found or corrupt' })
+        }
       },
     },
   ]

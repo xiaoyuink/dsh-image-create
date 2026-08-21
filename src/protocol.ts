@@ -27,6 +27,15 @@ export const CONFIG_API = {
 /** The image-generation proxy route. */
 export const GENERATE_API = '/api/dsh-image-create/generate'
 
+/**
+ * 附件存储 raw 图片路由前缀（与 dsh-image-vision 同款设计）：生成的图片
+ * 通过 DSH 附件存储（attachments.saveImage，永久保留）持久化，并以
+ * `![图片](/api/dsh-image-create/raw/<attachmentId>?m=..&b=..&w=..&h=..)`
+ * 的 markdown 引用嵌入 agent 消息，消息对话框即可渲染图片。
+ * 元数据编进 URL（digest/类型/尺寸），进程重启后旧引用依然可读。
+ */
+export const RAW_API = '/api/dsh-image-create/raw'
+
 /** Host-mediated GitHub Release update routes. */
 export const UPDATE_API = {
   check: '/api/dsh-image-create/update/check',
