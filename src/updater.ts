@@ -5,7 +5,6 @@ import { PLUGIN_VERSION } from './protocol.ts'
 
 /** Keep this in sync with package.json for each published release. */
 export const CURRENT_VERSION = PLUGIN_VERSION
-export const PACKAGE_NAME = '@xiaoyuink/dsh-image-create'
 export const RELEASES_URL = 'https://api.github.com/repos/xiaoyuink/dsh-image-create/releases/latest'
 
 const CHECK_TIMEOUT_MS = 10_000
@@ -86,7 +85,8 @@ export function profileFromProcess(argv: readonly string[] = process.argv, env: 
   return 'web'
 }
 
-/** Run the same official command documented for plugin installation. */
+/** Run the same official command documented for plugin installation, from the
+ *  prebuilt GitHub Release tarball. */
 export function installUpdate(
   version: string,
   spawnFn: typeof spawn = spawn,
@@ -97,8 +97,10 @@ export function installUpdate(
     return Promise.reject(new Error('invalid update version'))
   }
   const profile = profileFromProcess(argv, env)
+  // Release 资产命名：xiaoyuink-dsh-image-create-<version>.tgz（见仓库 Release 流程）。
+  const tarballUrl = `https://github.com/xiaoyuink/dsh-image-create/releases/download/v${version}/xiaoyuink-dsh-image-create-${version}.tgz`
   const command = process.platform === 'win32' ? 'dsh.cmd' : 'dsh'
-  const child = spawnFn(command, ['plugin', '--profile', profile, 'add', `${PACKAGE_NAME}@${version}`], {
+  const child = spawnFn(command, ['plugin', '--profile', profile, 'add', tarballUrl], {
     shell: process.platform === 'win32',
     stdio: 'ignore',
   }) as ChildProcess
