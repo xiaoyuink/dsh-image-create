@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tt } from './helpers.ts'
 import { ProviderEditor, type Provider, type ProviderModel } from './ProviderEditor.tsx'
+import { PLUGIN_VERSION, UPDATE_API, type UpdateInfo } from '../protocol.ts'
 
 interface ImageGenConfig {
   enabled?: boolean
@@ -409,6 +410,10 @@ export function ImageGenSettingsPage() {
   const [saved, setSaved] = useState(false)
   const [drag, setDrag] = useState<{ index: number } | null>(null)
   const [previewOrder, setPreviewOrder] = useState<Provider[] | null>(null)
+  // ===== 在线更新相关状态 =====
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null) // 更新检查结果（null=未检查/无更新）
+  const [updating, setUpdating] = useState(false)
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null)
 
   const reload = async (): Promise<void> => {
     try {
@@ -424,6 +429,40 @@ export function ImageGenSettingsPage() {
     }
   }
   useEffect(() => { void reload() }, [])
+
+  // 打开设置页即检查一次 GitHub Release 更新（可选功能，失败静默不打扰）。
+  useEffect(() => {
+    let disposed = false
+    fetch(UPDATE_API.check, { method: 'POST' })
+      .then(r => r.json())
+      .then((json: { ok?: boolean; update?: UpdateInfo }) => {
+        if (disposed || !json.ok || json.update === undefined) return
+        setUpdateInfo(json.update)
+      })
+      .catch(() => { /* 更新发现是可选功能 */ })
+    return () => { disposed = true }
+  }, [])
+
+  // 一键安装最新 Release（与视觉插件同款：宿主校验版本后从 GitHub Release tarball 安装）。
+  const applyUpdate = async (): Promise<void> => {
+    if (updateInfo === null || updating) return
+    setUpdating(true)
+    setUpdateMessage(null)
+    try {
+      const resp = await fetch(UPDATE_API.apply, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: updateInfo.latestVersion }),
+      })
+      const json = await resp.json()
+      if (json.ok !== true) throw new Error(json?.message ?? `HTTP ${resp.status}`)
+      setUpdateMessage(`已更新到 ${String(json.updatedVersion)}，请重启 DSH 生效`)
+    } catch (e) {
+      setUpdateMessage('更新失败: ' + String(e instanceof Error ? e.message : e))
+    } finally {
+      setUpdating(false)
+    }
+  }
 
   const flashSaved = (): void => {
     setSaved(true)
@@ -691,7 +730,37 @@ export function ImageGenSettingsPage() {
 
   return (
     <div className="zGbnIq_section">
-      <h2 className="zGbnIq_title">{tt('settings.title')}</h2>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <h2 className="zGbnIq_title">{tt('settings.title')}</h2>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400 }}>v{PLUGIN_VERSION}</span>
+          {updateInfo !== null && updateInfo.updateAvailable ? (
+            <span style={{ fontSize: 12, color: 'var(--dsw-alias-state-warn-label)' }}>有新版本 v{updateInfo.latestVersion}</span>
+          ) : null}
+          {updateInfo !== null && updateInfo.updateAvailable ? (
+            <button
+              type="button"
+              className="zGbnIq_addButton"
+              disabled={updating}
+              onClick={() => void applyUpdate()}
+              style={{ height: 26, padding: '0 10px', fontSize: 12 }}
+            >
+              {updating ? '更新中…' : '更新'}
+            </button>
+          ) : null}
+          {updateInfo !== null && updateInfo.updateAvailable ? (
+            <a
+              href={updateInfo.releaseUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{ fontSize: 12, color: 'var(--dsw-alias-link, var(--dsw-alias-primary))', textDecoration: 'none' }}
+            >
+              查看 Release
+            </a>
+          ) : null}
+          {updateMessage !== null ? <span style={{ fontSize: 12, color: 'var(--dsw-alias-state-success-primary)' }}>{updateMessage}</span> : null}
+        </span>
+      </div>
       <p className="zGbnIq_intro">{tt('settings.description')}</p>
 
       {/* 总开关（与视觉插件一致的样式） */}
