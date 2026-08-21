@@ -8,7 +8,7 @@
  * a platform module) so the studio matches the dsh shell look by construction.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ImageGenApi } from './api.ts'
@@ -185,14 +185,106 @@ export function ImageGenPanel(props: {
   const previewStage = useRef<HTMLDivElement>(null)
   const previewDrag = useRef<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null)
   const previewScaleRef = useRef(previewScale)
+  /** 下一次 React 提交渲染后要应用的滚动位置（光标/中心锚定）。 */
+  const pendingPreviewScroll = useRef<{ left: number; top: number } | null>(null)
   const [previewDragging, setPreviewDragging] = useState(false)
+  /** scale ≤ 1 时图片在 stage 内的平移偏移（配合居中缩放，实现鼠标锚定）。 */
+  const [previewTranslate, setPreviewTranslate] = useState({ x: 0, y: 0 })
   const elapsed = useElapsed(generating, startedAt)
 
-  // Keep the cursor-anchored zoom's current scale readable inside onWheel
-  // without a re-render race (the wheel handler is attached once per open).
-  useEffect(() => {
+  // Keep previewScale in sync with the DOM ref for zoom calculations. This runs
+  // in the layout phase (before paint) so consecutive wheel events always read
+  // the scale that matches the already-committed DOM.
+  useLayoutEffect(() => {
     previewScaleRef.current = previewScale
   }, [previewScale])
+
+  // 缩放后应用锚定的滚动位置：在 React 提交 DOM（frame 尺寸已更新）之后、
+  // 浏览器绘制之前同步设置 scrollLeft/scrollTop。相比原来的 requestAnimationFrame，
+  // 这消除了 rAF 与 React 渲染的时序竞争 —— 之前 frame 尺寸与滚动位置可能
+  // 落在不同的帧，导致滚轮缩放时画面剧烈晃动。
+  useLayoutEffect(() => {
+    if (pendingPreviewScroll.current === null) return
+    const stage = previewStage.current
+    if (stage === null) {
+      pendingPreviewScroll.current = null
+      return
+    }
+    const { left, top } = pendingPreviewScroll.current
+    pendingPreviewScroll.current = null
+    stage.scrollLeft = left
+    stage.scrollTop = top
+  }, [previewScale])
+
+  /** 统一缩放入口：以指定锚点（默认视口中心）缩放预览。
+   *
+   *  两种缩放状态使用不同的锚定机制：
+   *  - scale ≤ 1：frame 与 stage 同大（无滚动），图片在 frame 内居中，
+   *    用 translate 平移图片，使锚点下方的图片内容保持不动；
+   *  - scale > 1：frame 放大、图片填满 frame（内容从原点开始），
+   *    用 scrollLeft/scrollTop 锚定，滚动位置在 React 提交后同步（见上方
+   *    useLayoutEffect），消除 rAF 与渲染竞争导致的晃动。
+   *  跨过 1 的边界时两种机制在 scale=1 处自然连续（此时图片=frame=stage，
+   *  translate=0 且 scroll=0）。 */
+  const applyZoom = (next: number, anchorX?: number, anchorY?: number): void => {
+    const stage = previewStage.current
+    const current = previewScaleRef.current
+    if (next === current) return
+    if (stage === null) {
+      setPreviewScale(next)
+      return
+    }
+    const ratio = next / current
+    const ax = anchorX ?? stage.clientWidth / 2
+    const ay = anchorY ?? stage.clientHeight / 2
+    const stageW = stage.clientWidth
+    const stageH = stage.clientHeight
+
+    if (current <= 1) {
+      // 从缩小/原始状态缩放：图片在 frame 内居中，用 translate 锚定。
+      const imgW = stageW * current
+      const imgH = stageH * current
+      const imgLeft = (stageW - imgW) / 2
+      const imgTop = (stageH - imgH) / 2
+      // 锚点在图片内容坐标中的比例（0~1）。
+      const px = (ax - imgLeft) / imgW
+      const py = (ay - imgTop) / imgH
+      if (next <= 1) {
+        // 仍在缩小区：平移图片使锚点内容保持不动。
+        const imgW2 = stageW * next
+        const imgH2 = stageH * next
+        const newLeft = ax - px * imgW2
+        const newTop = ay - py * imgH2
+        setPreviewTranslate({ x: newLeft - (stageW - imgW2) / 2, y: newTop - (stageH - imgH2) / 2 })
+        pendingPreviewScroll.current = null
+      } else {
+        // 跨过 1 放大：scale=1 处 translate=0、scroll=0，此后转滚动锚定。
+        // 锚点内容坐标（相对内容原点 = frame 原点）。
+        const contentX = imgLeft + px * imgW
+        const contentY = imgTop + py * imgH
+        pendingPreviewScroll.current = {
+          left: contentX * ratio - ax,
+          top: contentY * ratio - ay,
+        }
+        setPreviewTranslate({ x: 0, y: 0 })
+      }
+    } else if (next > 1) {
+      // 放大区：滚动锚定（frame 从内容原点开始，图片填满 frame）。
+      pendingPreviewScroll.current = {
+        left: (ax + stage.scrollLeft) * ratio - ax,
+        top: (ay + stage.scrollTop) * ratio - ay,
+      }
+    } else {
+      // 从放大缩小到 ≤1：锚点内容坐标 = scroll + 视口位置。
+      const contentX = stage.scrollLeft + ax
+      const contentY = stage.scrollTop + ay
+      // 目标图片在 frame（=stage）内居中，translate 使锚点内容显示在锚点处：
+      // 视口位置 = translate + 内容坐标 * ratio（图片原点居中偏移已抵消）。
+      setPreviewTranslate({ x: ax - contentX * ratio, y: ay - contentY * ratio })
+      pendingPreviewScroll.current = null
+    }
+    setPreviewScale(next)
+  }
 
   // 配置就绪后，把当前选中的模型同步到 active 或第一个可用模型。
   useEffect(() => {
@@ -432,6 +524,23 @@ export function ImageGenPanel(props: {
       setViewingHistoryId(null)
       if (result.history !== undefined) setHistory(result.history)
       if (result.historyError !== undefined) setError(result.historyError)
+      // 生成成功后自动把图片插入到主对话框（草稿附件，等同拖拽图片）。
+      const insertAll = async (): Promise<void> => {
+        for (const image of result.images) {
+          try {
+            const binary = atob(image.b64)
+            const bytes = new Uint8Array(binary.length)
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+            const blob = new Blob([bytes], { type: image.mime })
+            const file = new File([blob], `dsh-image-${result.images.indexOf(image) + 1}.${extensionOf(image.mime)}`, { type: image.mime })
+            const err = await addImageFileToConversation(file)
+            if (err !== null) setError(err)
+          } catch (caught) {
+            setError(errorMessage(caught))
+          }
+        }
+      }
+      void insertAll()
     } catch (caught) {
       setError(errorMessage(caught))
     } finally {
@@ -442,12 +551,16 @@ export function ImageGenPanel(props: {
 
   /** Open the full-screen image preview at a given index. */
   const openPreview = (previewImages: GeneratedImage[], index: number): void => {
+    pendingPreviewScroll.current = null
+    setPreviewTranslate({ x: 0, y: 0 })
     setPreview({ images: previewImages, index })
     setPreviewScale(1)
     setPromptCopied(false)
   }
 
   const closePreview = (): void => {
+    pendingPreviewScroll.current = null
+    setPreviewTranslate({ x: 0, y: 0 })
     setPreview(null)
     setPreviewScale(1)
     setPromptCopied(false)
@@ -455,6 +568,8 @@ export function ImageGenPanel(props: {
 
   /** Step the preview by ±1, wrapping around. */
   const stepPreview = (delta: number): void => {
+    pendingPreviewScroll.current = null
+    setPreviewTranslate({ x: 0, y: 0 })
     setPreviewScale(1)
     setPromptCopied(false)
     setPreview(current => {
@@ -471,9 +586,13 @@ export function ImageGenPanel(props: {
       if (event.key === 'Escape') closePreview()
       else if (event.key === 'ArrowLeft') stepPreview(-1)
       else if (event.key === 'ArrowRight') stepPreview(1)
-      else if (event.key === '+' || event.key === '=') setPreviewScale(current => clampPreviewScale(current + PREVIEW_SCALE_STEP))
-      else if (event.key === '-') setPreviewScale(current => clampPreviewScale(current - PREVIEW_SCALE_STEP))
-      else if (event.key === '0') setPreviewScale(1)
+      else if (event.key === '+' || event.key === '=') applyZoom(clampPreviewScale(previewScaleRef.current + PREVIEW_SCALE_STEP))
+      else if (event.key === '-') applyZoom(clampPreviewScale(previewScaleRef.current - PREVIEW_SCALE_STEP))
+      else if (event.key === '0') {
+        pendingPreviewScroll.current = null
+        setPreviewTranslate({ x: 0, y: 0 })
+        setPreviewScale(1)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -1195,19 +1314,9 @@ export function ImageGenPanel(props: {
                   const rect = stage.getBoundingClientRect()
                   const mx = event.clientX - rect.left
                   const my = event.clientY - rect.top
-                  const oldLeft = stage.scrollLeft
-                  const oldTop = stage.scrollTop
                   const current = previewScaleRef.current
                   const next = clampPreviewScale(current + (event.deltaY < 0 ? PREVIEW_SCALE_STEP : -PREVIEW_SCALE_STEP))
-                  if (next === current) return
-                  const ratio = next / current
-                  setPreviewScale(next)
-                  window.requestAnimationFrame(() => {
-                    const st = previewStage.current
-                    if (st === null) return
-                    st.scrollLeft = (mx + oldLeft) * ratio - mx
-                    st.scrollTop = (my + oldTop) * ratio - my
-                  })
+                  applyZoom(next, mx, my)
                 }}
                 onMouseDown={(event) => {
                   if (event.button !== 0 || previewFrameScale <= 1) return
@@ -1229,7 +1338,11 @@ export function ImageGenPanel(props: {
                 >
                   <img
                     className={css.lightboxImage}
-                    style={{ width: `${previewImageScale * 100}%`, height: `${previewImageScale * 100}%` }}
+                    style={{
+                      width: `${previewImageScale * 100}%`,
+                      height: `${previewImageScale * 100}%`,
+                      transform: `translate(${previewTranslate.x}px, ${previewTranslate.y}px)`,
+                    }}
                     src={srcOf(previewImage)}
                     alt={previewImage.revisedPrompt ?? tt('preview.title')}
                     draggable={false}
@@ -1237,13 +1350,13 @@ export function ImageGenPanel(props: {
                 </div>
               </div>
               <div className={css.lightboxTools} role="group" aria-label={tt('preview.zoomControls')}>
-                <button type="button" className={css.lightboxTool} aria-label={tt('preview.zoomOut')} title={tt('preview.zoomOut')} onClick={() => { setPreviewScale(current => clampPreviewScale(current - PREVIEW_SCALE_STEP)) }}>
+                <button type="button" className={css.lightboxTool} aria-label={tt('preview.zoomOut')} title={tt('preview.zoomOut')} onClick={() => { applyZoom(clampPreviewScale(previewScaleRef.current - PREVIEW_SCALE_STEP)) }}>
                   <svg viewBox="0 0 16 16" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="M4.8 7h4.4M13 13l-2.8-2.8"/></svg>
                 </button>
-                <button type="button" className={css.lightboxZoomLevel} aria-label={tt('preview.zoomReset')} title={tt('preview.zoomReset')} onClick={() => { setPreviewScale(1) }}>
+                <button type="button" className={css.lightboxZoomLevel} aria-label={tt('preview.zoomReset')} title={tt('preview.zoomReset')} onClick={() => { pendingPreviewScroll.current = null; setPreviewTranslate({ x: 0, y: 0 }); setPreviewScale(1) }}>
                   {tt('preview.zoomLevel', { percent: Math.round(previewScale * 100) })}
                 </button>
-                <button type="button" className={css.lightboxTool} aria-label={tt('preview.zoomIn')} title={tt('preview.zoomIn')} onClick={() => { setPreviewScale(current => clampPreviewScale(current + PREVIEW_SCALE_STEP)) }}>
+                <button type="button" className={css.lightboxTool} aria-label={tt('preview.zoomIn')} title={tt('preview.zoomIn')} onClick={() => { applyZoom(clampPreviewScale(previewScaleRef.current + PREVIEW_SCALE_STEP)) }}>
                   <svg viewBox="0 0 16 16" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="M7 4.8v4.4M4.8 7h4.4M13 13l-2.8-2.8"/></svg>
                 </button>
               </div>
