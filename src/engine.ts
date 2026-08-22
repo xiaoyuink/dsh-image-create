@@ -253,7 +253,8 @@ async function requestOneImage(
     return normalizeItem(entry as Record<string, unknown>, upstream)
   }))
 }
-/** DashScope 官方原生文生图接口（qwen-image-3.x 走这条原生路由，不是 OpenAI 兼容的 /images/generations）。 */
+/** DashScope 官方原生图像生成接口（qwen-image 系列文生图/图生图都走这条原生路由，
+ *  不是 OpenAI 兼容的 /images/generations 或 /images/edits —— 兼容模式没有 edits 路由）。 */
 const DASHSCOPE_NATIVE_TEXT_ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
 const DASHSCOPE_NATIVE_MODEL_RE = /^qwen-image-\d/i
 
@@ -264,17 +265,26 @@ function dashScopeNativeUrl(baseUrl: string): string | undefined {
   return undefined
 }
 
-function isDashScopeNativeTextRequest(baseUrl: string, model: string): boolean {
+function isDashScopeNativeRequest(baseUrl: string, model: string): boolean {
   return dashScopeNativeUrl(baseUrl) !== undefined && DASHSCOPE_NATIVE_MODEL_RE.test(model)
 }
 
-/** 调用 DashScope 官方 multimodal-generation 原生文生图接口。 */
+/** 调用 DashScope 官方 multimodal-generation 原生接口。文生图时 content 只有
+ *  [{ text }]；图生图（I2I）时在 text 前追加 [{ image }]，image 为 data URL
+ *  （阿里云官方文档支持直接传 base64 data URL）。 */
 async function requestDashScopeNativeImage(
   endpoint: string,
   upstream: UpstreamConfig,
   prompt: string,
   model: string,
+  image?: string,
 ): Promise<GeneratedImage[]> {
+  const content: Array<Record<string, unknown>> = []
+  if (image !== undefined && image !== '') {
+    if (parseDataUrl(image) === undefined) throw new ImageGenError('参考图片格式无效', 'edit-image-invalid')
+    content.push({ image })
+  }
+  content.push({ text: prompt })
   let response: Response
   try {
     response = await fetch(endpoint, {
@@ -285,7 +295,7 @@ async function requestDashScopeNativeImage(
       },
       body: JSON.stringify({
         model,
-        input: { messages: [{ role: 'user', content: [{ text: prompt }] }] },
+        input: { messages: [{ role: 'user', content }] },
         parameters: { prompt_extend: true },
       }),
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
@@ -347,13 +357,16 @@ async function generateToEndpoint(
 ): Promise<GenerateResult> {
   const params = effectiveParams(request)
   const count = effectiveCount(request)
-const nativeEndpoint = request.mode === 'text' && isDashScopeNativeTextRequest(baseUrl, params.model)
+  // DashScope qwen-image 系列：文生图与图生图都走官方原生路由（兼容模式没有
+  // /images/edits，会 404）。图生图时把参考图 data URL 透传给原生接口。
+  const nativeEndpoint = isDashScopeNativeRequest(baseUrl, params.model)
     ? dashScopeNativeUrl(baseUrl)
     : undefined
   if (nativeEndpoint !== undefined) {
+    const image = request.mode === 'edit' ? request.image : undefined
     return {
       images: (await Promise.all(
-        Array.from({ length: count }, () => requestDashScopeNativeImage(nativeEndpoint, upstream, request.prompt, params.model)),
+        Array.from({ length: count }, () => requestDashScopeNativeImage(nativeEndpoint, upstream, request.prompt, params.model, image)),
       )).flat(),
     }
   }

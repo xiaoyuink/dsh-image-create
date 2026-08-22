@@ -524,23 +524,6 @@ export function ImageGenPanel(props: {
       setViewingHistoryId(null)
       if (result.history !== undefined) setHistory(result.history)
       if (result.historyError !== undefined) setError(result.historyError)
-      // 生成成功后自动把图片插入到主对话框（草稿附件，等同拖拽图片）。
-      const insertAll = async (): Promise<void> => {
-        for (const image of result.images) {
-          try {
-            const binary = atob(image.b64)
-            const bytes = new Uint8Array(binary.length)
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-            const blob = new Blob([bytes], { type: image.mime })
-            const file = new File([blob], `dsh-image-${result.images.indexOf(image) + 1}.${extensionOf(image.mime)}`, { type: image.mime })
-            const err = await addImageFileToConversation(file)
-            if (err !== null) setError(err)
-          } catch (caught) {
-            setError(errorMessage(caught))
-          }
-        }
-      }
-      void insertAll()
     } catch (caught) {
       setError(errorMessage(caught))
     } finally {
