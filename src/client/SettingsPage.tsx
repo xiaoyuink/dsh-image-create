@@ -320,7 +320,9 @@ function ProviderCard({ provider: p, active, onUse, onRemoveModel, onAddModels, 
             title={collapsed ? tt('settings.expand') : tt('settings.collapse')}
             onClick={() => setCollapsed(!collapsed)}
           >
-            <IconChevronDownOutline14 style={collapsed ? { transform: 'rotate(-90deg)' } : undefined} />
+            <span style={collapsed ? { transform: 'rotate(-90deg)' } : undefined}>
+              <IconChevronDownOutline14 />
+            </span>
           </button>
           <button type="button" className="zGbnIq_secondaryButton" onClick={onEdit}>
             {tt('settings.editProvider')}

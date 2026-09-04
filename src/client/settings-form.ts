@@ -7,7 +7,32 @@
  * sibling UI package).
  */
 
-import { createSnapshotStore, type SettingsScope, type SettingsScopeSnapshot, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import { type SettingsScope, type SettingsScopeSnapshot } from './settings-scope.ts'
+
+/** Minimal snapshot store (client-runtime 在当前 DSH 已移除，本地实现)。 */
+export interface SnapshotStore<T> {
+  getSnapshot(): T
+  subscribe(fn: () => void): () => void
+  set(next: T): void
+}
+
+/** Create a minimal snapshot store. */
+export function createSnapshotStore<T>(value: T): SnapshotStore<T> {
+  let state = value
+  const listeners = new Set<() => void>()
+  const store: SnapshotStore<T> = {
+    getSnapshot: () => state,
+    subscribe: (fn) => {
+      listeners.add(fn)
+      return () => { listeners.delete(fn) }
+    },
+    set: (next) => {
+      state = next
+      for (const listener of [...listeners]) listener()
+    },
+  }
+  return store
+}
 
 /** The write one field's staged text performs when the card is saved. */
 export type FieldWrite =

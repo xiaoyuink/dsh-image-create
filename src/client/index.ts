@@ -10,12 +10,20 @@
  * thrown — the web shell fails the whole boot when a plugin apply throws,
  * and an external plugin must not take the GUI down.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// ClientContext in the current DSH: the cordis Context merged with the
+// client-side plugin augmentations (slots / locale / sessions / connection).
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+// Type-only: pulls the UI renderer's Context merge (ctx.slots).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+// Type-only: pulls the session controller's Context merge (ctx.sessions).
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the LocaleNamespaceMap merge table.
+// Type-only: pulls the LocaleNamespaceMap merge table and the
+// conversation SlotMap rows (conversation.input.left etc.).
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { bindConversationBridge, SessionBridge } from './conversation-bridge.ts'
 import { ImageGenApi } from './api.ts'
 import { ImageGenController } from './controller.ts'
@@ -69,7 +77,9 @@ export function apply(ctx: ClientContext): void {
   // 主对话框图片附件桥：注入会话服务引用 + 挂载零渲染的会话桥组件，
   // 「添加到对话框」借此直接把图片加入输入框（绕开 dsh-drop-caret 的
   // Files drop 落盘拦截，不修改任何其他插件）。
-  bindConversationBridge(ctx.sessions as { scope: (sessionId: string) => unknown })
+  // 当前 DSH 将 SessionId/AgentContext 品牌化（运行时为同一字符串），
+  // 桥只按字符串使用，故经 unknown 中转放宽类型。
+  bindConversationBridge(ctx.sessions as unknown as { scope: (sessionId: string) => unknown })
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     id: 'dsh-image-create-session',

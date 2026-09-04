@@ -12,9 +12,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 // Type-only: pulls the webServer Context merge (route registration).
 import type {} from '@deepseek-ai/dsh-host-webserver'
 // Type-only: pulls the systemPrompt Context merge (announcement section).
@@ -37,7 +36,7 @@ export { generateImage, generateImageWithFallback, ImageGenError } from './engin
 export { checkForUpdate, clearUpdateCache, compareVersions, CURRENT_VERSION, installUpdate, profileFromProcess } from './updater.ts'
 
 /** The branded settings namespace of this plugin (the card edits it). */
-export const ImageGenSettingsNamespace = settingsNamespace(IMAGEGEN_SETTINGS_NAMESPACE)
+export const ImageGenSettingsNamespace = IMAGEGEN_SETTINGS_NAMESPACE
 
 /** Plugin config, validated by the same-named schemastery schema. */
 export interface Config {
@@ -507,12 +506,18 @@ export function apply(ctx: Context, config?: Config): void {
     })
   }
 
-  installSettingsSection(ctx, ImageGenSettingsNamespace, Config, config ?? {}, {
-    setSource: (source) => {
-      current = source
-      sync()
-    },
-    onChange: sync,
+  // 注册配置 section：settings 就绪后把 Config 作为 base 层接入命名空间，
+  // 配置变更（含设置页保存）通过 onChange 重算工具/路由/系统提示。
+  // 当前 DSH 版本不再导出 installSettingsSection，等价能力在
+  // SettingsProvider.installSection 上（owner 为插件 ctx）。
+  ctx.inject(['settings'], (sctx) => {
+    sctx.settings.installSection(ctx, ImageGenSettingsNamespace, Config, config ?? {}, {
+      setSource: (source) => {
+        current = source
+        sync()
+      },
+      onChange: sync,
+    })
   })
 
   // Initial registration from the composition entry.

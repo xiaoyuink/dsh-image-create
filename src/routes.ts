@@ -7,8 +7,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { SettingsConflictError, settingsNamespace, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
-import type { ImageAttachmentRef, SaveImageAttachment, StoredImageAttachment } from '@deepseek-ai/dsh-attachment'
+import { SettingsConflictError, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
+import { AttachmentId, type ImageAttachmentRef, type ImageMediaType, type SaveImageAttachment, type StoredImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { generateImage, generateImageWithFallback, normalizeConfig, resolveProviderKey, type UpstreamConfig } from './engine.ts'
 import { appendHistory, clearHistory, historyImagesDir, listHistory, openHistoryDir, readHistoryImage, removeHistory } from './history-store.ts'
 import { checkForUpdate, CURRENT_VERSION, installUpdate } from './updater.ts'
@@ -198,7 +198,9 @@ function parseRawRef(rawUrl: string | undefined): ImageAttachmentRef | null {
   if (!RAW_MEDIA_TYPES.has(mediaType)) return null
   if (!Number.isFinite(bytes) || !Number.isFinite(width) || !Number.isFinite(height)) return null
   if (bytes <= 0 || width <= 0 || height <= 0) return null
-  return { attachmentId, mediaType, bytes, width, height }
+  // 当前 DSH 的 dsh-attachment 将 attachmentId/mediaType 品牌化为
+  // AttachmentId / ImageMediaType（运行时为同一字符串，仅供类型层面）。
+  return { attachmentId: AttachmentId(attachmentId), mediaType: mediaType as ImageMediaType, bytes, width, height }
 }
 
 /** Project one settings descriptor onto the bridge wire view. */
@@ -539,7 +541,7 @@ export function makeRoutes(deps: ImageGenRoutesDeps, options: { enabled?: boolea
         }
         const expectedRevision = typeof body.expectedRevision === 'number' ? body.expectedRevision : undefined
         try {
-          await deps.settings.mutate(settingsNamespace(ns), body.ops, expectedRevision)
+          await deps.settings.mutate(ns, body.ops, expectedRevision)
         } catch (error) {
           writeJson(res, 200, failureOf(error))
           return

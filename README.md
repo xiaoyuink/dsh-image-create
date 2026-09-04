@@ -198,6 +198,7 @@ dsh-image-create/
 
 > **给维护者**：发布 Release 时，除 `xiaoyuink-dsh-image-create-<版本>.tgz` 外，请再上传一份固定名资产 `xiaoyuink-dsh-image-create-latest.tgz`（内容相同），保证首页「一条命令安装最新 Release」的 `releases/latest/download/` 链接始终指向最新的包。
 
+- **v1.5.0**：适配 DSH **0.1.2-rc.1** —— `schemastery` 依赖迁移为 `@deepseek-ai/schemastery`；settings 注册改用当前 `SettingsProvider.installSection`（`installSettingsSection`/`settingsNamespace` 已从 dsh-settings 移除）；移除已不存在的 `@deepseek-ai/dsh-client-runtime` 客户端依赖（client bundle 改为外部依赖 react / dsh-client-ui-primitives，与视觉插件同款）；客户端 Context 类型改用 `@deepseek-ai/cordis` 并补齐 renderer / session-controller / conversation 类型声明；`ImageAttachmentRef` 品牌类型适配（attachmentId/mediaType 按当前 dsh-attachment 品牌化）。
 - **v1.4.1**：设置页标题行右上角显示当前版本号（小字），检测到 GitHub 新版本时在标题行提示「有新版本」并提供一键更新。
 - **v1.4.0**：生成图片持久化到 DSH 附件存储并渲染到消息（markdown 引用 + 图片块，超限自动压缩）；面板预览缩放鼠标锚定重构（消除滚轮缩放晃动）；生成后自动把图片插入对话；在线更新改用 GitHub Release tarball 安装（无需 npm 发布）。
 - **v1.3.0**：设置页编辑供应商时「获取模型列表」支持已存密钥自动回查（修复 `cred:REF` 未解析导致 401）；候选模型按关键词标注「生图/非生图」，非生图模型禁选并支持人工纠错（⇄ 按钮翻转判定）；候选列表新增搜索框（不区分大小写）与双级排序（按名称/按是否生图，各可升/降序）；供应商卡片与卡片内模型支持拖拽排序（≡ 手柄，松手自动保存）；预设厂商下拉对已添加厂商置灰标注「已添加」防重复；添加供应商不再自动预填预设模型（须点「获取模型列表」勾选或手动添加）。
